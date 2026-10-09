@@ -1,0 +1,20 @@
+{
+  "name": "certverify",
+  "private": true,
+  "description": "Digital degree certificate issuing and verification portal",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c yellow,cyan \"npm run dev -w backend\" \"npm run dev -w frontend\"",
+    "build": "npm run build -w frontend",
+    "start": "npm start -w backend",
+    "test": "npm test -w backend",
+    "tamper": "npm run tamper -w backend --",
+    "sample": "npm run sample -w backend --"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
