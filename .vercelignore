@@ -1,0 +1,10 @@
+# Never upload local data: it holds the private signing key and the dev database.
+backend/data
+.env
+**/.env
+.env.local
+**/.env.local
+node_modules
+frontend/dist
+samples
+.claude
