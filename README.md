@@ -10,13 +10,13 @@ The college registrar **uploads the scanned copy of a degree certificate**. The 
 Employers scan that QR code, or type the certificate ID, on the public page. The portal **cross-verifies** it against
 the database, and **every verification, with who did it, shows up live on the registrar's console.**
 
-> **QR = pointer. Hash = consistency. Signature + registry = authenticity.**
-
 | Layer    | Stack |
 | -------- | ----- |
-| Frontend | React 18 + Vite, React Router, `html5-qrcode` (camera and photo scanning) |
-| Backend  | Node.js 22.13+ / Express 5, built-in `node:sqlite`, built-in `node:crypto` (Ed25519, SHA-256, scrypt) |
+| Frontend | React 18 + Vite, React Router, `html5-qrcode` (camera and photo scanning), light/dark themes |
+| Backend  | Node.js 22 / Express 5, built-in `node:crypto` (Ed25519, SHA-256, scrypt) |
+| Database | [Turso](https://turso.tech) (hosted SQLite) in production; a local SQLite file in development (same client and SQL) |
 | PDF / QR | `pdf-lib` (appends the verification page to the scan), `qrcode` |
+| Hosting  | Vercel: static React build + one serverless function for `/api` |
 
 ## Quick start
 
@@ -41,7 +41,51 @@ on `/scan`, works anywhere.
 npm test
 ```
 
-17 end-to-end tests run against a real server and a throwaway database.
+20 end-to-end tests run against a real server and a throwaway database.
+
+## Deploy to Vercel
+
+Vercel has no permanent disk, so production storage lives elsewhere:
+
+| What | Where in production | Env var |
+| ---- | ------------------- | ------- |
+| Database (certificates, scans, verifications, sessions) | Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` |
+| Institution signing key | Vercel secret env var | `INSTITUTION_PRIVATE_KEY` |
+| Registrar login (created on first request) | — | `ADMIN_EMAIL`, `ADMIN_PASSWORD` |
+
+**1. Create the Turso database.** The easiest route is Vercel → *Storage* → *Create* → **Turso** (Marketplace), which
+creates the database and adds `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to the project for you. Alternatively, sign up at
+turso.tech, create a database, then copy its URL (`libsql://…`) and create a token.
+
+**2. Export the signing key** on your machine:
+
+```bash
+npm run key:export
+```
+
+It prints one long line. That line is the college's private key: anyone holding it can sign certificates. Keep a safe
+copy offline. If it's lost or changed, every certificate already issued stops verifying.
+
+**3. Import the repo into Vercel.** Go to vercel.com → *Add New → Project* → pick the GitHub repo. Keep the root
+directory as `/`; `vercel.json` sets the build. Before deploying, add these Environment Variables:
+
+| Name | Value |
+| ---- | ----- |
+| `INSTITUTION_PRIVATE_KEY` | the line from step 2 (mark as *Sensitive*) |
+| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | from step 1, unless the integration added them |
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | the registrar login, with a **strong** password |
+| `INSTITUTION_NAME` | optional; printed on the verification page |
+| `PUBLIC_URL` | optional; defaults to the project's production domain. Set it if you use a custom domain |
+
+**4. Deploy.** Then open `https://<project>.vercel.app/admin`, sign in, and upload a certificate.
+
+Limits on Vercel:
+- **Scan size:** uploads are capped at **4 MB**, because Vercel rejects request bodies over 4.5 MB. Scan at 150–200 dpi or compress the PDF.
+- **QR address:** QR codes point at `PUBLIC_URL`. Certificates issued before a domain change keep the old link.
+- **Login lockout:** the failed-login counter is kept separately by each server instance.
+
+If the site shows "The server is not configured correctly", open *Vercel → Project → Logs*. The first line names the
+missing variable.
 
 ## The flow
 

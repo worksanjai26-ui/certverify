@@ -41,7 +41,9 @@ export async function api(path, { method = 'GET', body, form, timeout = 20000 } 
     const res = await fetch(`/api${path}`, { method, headers, body: payload, signal: controller.signal });
     const data = (res.headers.get('content-type') || '').includes('application/json') ? await res.json() : null;
     if (!res.ok) {
-      const err = new Error(data?.error || `Request failed (${res.status})`);
+      // Vercel rejects bodies over 4.5 MB itself, before our server can explain.
+      const fallback = res.status === 413 ? 'The file is too large to upload. Compress it and try again.' : `Request failed (${res.status})`;
+      const err = new Error(data?.error || fallback);
       err.status = res.status;
       err.data = data;
       if (res.status === 401 && path.startsWith('/admin') && path !== '/admin/login') {

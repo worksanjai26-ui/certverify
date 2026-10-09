@@ -34,15 +34,18 @@ export function publicDetails(p) {
   };
 }
 
-function findRow(db, id, fileHash) {
-  if (id) return db.prepare('SELECT * FROM certificates WHERE id = ?').get(id);
+// Leaves out the two file blobs; verification only needs their hashes.
+const ROW_COLUMNS = 'id, payload, signature, key_id, document_hash, stamped_hash, status, revoked_at, revoke_reason';
+
+async function findRow(db, id, fileHash) {
+  if (id) return db.get(`SELECT ${ROW_COLUMNS} FROM certificates WHERE id = ?`, id);
   if (fileHash) {
-    return db.prepare('SELECT * FROM certificates WHERE document_hash = ? OR stamped_hash = ?').get(fileHash, fileHash);
+    return db.get(`SELECT ${ROW_COLUMNS} FROM certificates WHERE document_hash = ? OR stamped_hash = ?`, fileHash, fileHash);
   }
   return undefined;
 }
 
-export function verifyCertificate(db, keys, { certificateId, qrHash, qrSignature, file }) {
+export async function verifyCertificate(db, keys, { certificateId, qrHash, qrSignature, file }) {
   const id = certificateId ? normalizeId(certificateId) : null;
   const fileHash = file ? sha256(file) : null;
   const steps = newSteps();
@@ -51,7 +54,7 @@ export function verifyCertificate(db, keys, { certificateId, qrHash, qrSignature
   if (qrHash) evidence.qrHash = qrHash;
   if (qrSignature) evidence.qrSignature = qrSignature;
 
-  const row = findRow(db, id, fileHash);
+  const row = await findRow(db, id, fileHash);
   if (!row) {
     steps.found.status = 'fail';
     steps.found.detail = id

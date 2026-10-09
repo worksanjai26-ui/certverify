@@ -7,7 +7,6 @@ import { qrTextFor, registerCertificate, verifyUrlFor } from '../register.js';
 import { ACCEPTED_TYPES, detectType } from '../stamp.js';
 import { normalizeId } from '../verify.js';
 
-const scanUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1 } });
 const norm = (s) => String(s ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ');
 
 // Columns for lists and detail views; leaves out the two file blobs.
@@ -61,9 +60,13 @@ function parseDetails(b) {
 export function adminRouter(ctx) {
   const { db, auth, cfg } = ctx;
   const router = express.Router();
+  const scanUpload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: Math.floor(cfg.maxUploadMb * 1024 * 1024), files: 1 },
+  });
 
   async function certificateResponse(id) {
-    const row = db.prepare(`SELECT ${CERT_COLUMNS} FROM certificates WHERE id = ?`).get(id);
+    const row = await db.get(`SELECT ${CERT_COLUMNS} FROM certificates WHERE id = ?`, id);
     if (!row) return null;
     const qrText = qrTextFor(cfg, row.id, row.document_hash, row.signature);
     return {
@@ -74,14 +77,14 @@ export function adminRouter(ctx) {
     };
   }
 
-  router.post('/login', (req, res) => {
+  router.post('/login', async (req, res) => {
     const { email, password } = req.body ?? {};
-    const result = auth.login(email, password, req.ip);
+    const result = await auth.login(email, password, req.ip);
     if (result.error) {
-      audit(db, { action: 'login_failed', detail: String(email ?? '').slice(0, 120), ip: req.ip });
+      await audit(db, { action: 'login_failed', detail: String(email ?? '').slice(0, 120), ip: req.ip });
       return res.status(result.status).json({ error: result.error });
     }
-    audit(db, { action: 'login', actor: result.user.email, ip: req.ip });
+    await audit(db, { action: 'login', actor: result.user.email, ip: req.ip });
     res.json(result);
   });
 
@@ -89,50 +92,50 @@ export function adminRouter(ctx) {
 
   router.get('/me', (req, res) => res.json({ user: req.user }));
 
-  router.post('/logout', (req, res) => {
-    auth.logout(req.tokenHash);
+  router.post('/logout', async (req, res) => {
+    await auth.logout(req.tokenHash);
     res.json({ ok: true });
   });
 
-  router.get('/stats', (req, res) => {
-    const certificates = db
-      .prepare(
+  router.get('/stats', async (req, res) => {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const [certificates, verifications, verdicts] = await Promise.all([
+      db.get(
         `SELECT COUNT(*) AS total,
                 COALESCE(SUM(status = 'active'), 0) AS active,
                 COALESCE(SUM(status = 'revoked'), 0) AS revoked
          FROM certificates`,
-      )
-      .get();
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
-    const verifications = db
-      .prepare(
+      ),
+      db.get(
         `SELECT COUNT(*) AS total,
                 COALESCE(SUM(at >= ?), 0) AS today,
                 COUNT(DISTINCT lower(verifier_org)) AS organisations
          FROM verifications`,
-      )
-      .get(startOfDay.toISOString());
-    const verdicts = db
-      .prepare('SELECT verdict, COUNT(*) AS n FROM verifications GROUP BY verdict ORDER BY n DESC')
-      .all();
-    res.json({ certificates: { ...certificates }, verifications: { ...verifications }, verdicts });
+        startOfDay.toISOString(),
+      ),
+      db.all('SELECT verdict, COUNT(*) AS n FROM verifications GROUP BY verdict ORDER BY n DESC'),
+    ]);
+    res.json({ certificates, verifications, verdicts });
   });
 
   // ---- Certificates ----
-  router.get('/certificates', (req, res) => {
+  router.get('/certificates', async (req, res) => {
     const q = `%${norm(req.query.q).toLowerCase()}%`;
     const status = ['active', 'revoked'].includes(req.query.status) ? req.query.status : null;
-    const rows = db
-      .prepare(
-        `SELECT ${CERT_COLUMNS},
-                (SELECT COUNT(*) FROM verifications v WHERE v.cert_id = c.id) AS verification_count
-         FROM certificates c
-         WHERE (lower(id) LIKE ? OR lower(roll_no) LIKE ? OR lower(student_name) LIKE ?)
-           AND (? IS NULL OR status = ?)
-         ORDER BY issued_at DESC`,
-      )
-      .all(q, q, q, status, status);
+    const rows = await db.all(
+      `SELECT ${CERT_COLUMNS},
+              (SELECT COUNT(*) FROM verifications v WHERE v.cert_id = c.id) AS verification_count
+       FROM certificates c
+       WHERE (lower(id) LIKE ? OR lower(roll_no) LIKE ? OR lower(student_name) LIKE ?)
+         AND (? IS NULL OR status = ?)
+       ORDER BY issued_at DESC`,
+      q,
+      q,
+      q,
+      status,
+      status,
+    );
     res.json({
       certificates: rows.map((r) => ({ ...summarize(r), verificationCount: r.verification_count })),
     });
@@ -148,7 +151,7 @@ export function adminRouter(ctx) {
     const details = parseDetails(req.body ?? {});
     if (details.error) return res.status(400).json({ error: details.error });
 
-    const existing = db.prepare('SELECT id FROM certificates WHERE document_hash = ?').get(sha256(req.file.buffer));
+    const existing = await db.get('SELECT id FROM certificates WHERE document_hash = ?', sha256(req.file.buffer));
     if (existing) {
       return res
         .status(409)
@@ -162,7 +165,7 @@ export function adminRouter(ctx) {
       details,
       actor: req.user.email,
     });
-    audit(db, {
+    await audit(db, {
       action: 'register',
       certId: id,
       detail: `${ACCEPTED_TYPES[type]} scan, ${(req.file.size / 1024).toFixed(0)} KB`,
@@ -176,79 +179,97 @@ export function adminRouter(ctx) {
     const data = await certificateResponse(normalizeId(req.params.id));
     if (!data) return res.status(404).json({ error: 'Certificate not found.' });
     const id = data.certificate.id;
-    res.json({
-      ...data,
-      verifications: db.prepare('SELECT * FROM verifications WHERE cert_id = ? ORDER BY id DESC LIMIT 200').all(id),
-      history: db.prepare('SELECT * FROM audit_events WHERE cert_id = ? ORDER BY id DESC LIMIT 50').all(id),
-    });
+    const [verifications, history] = await Promise.all([
+      db.all('SELECT * FROM verifications WHERE cert_id = ? ORDER BY id DESC LIMIT 200', id),
+      db.all('SELECT * FROM audit_events WHERE cert_id = ? ORDER BY id DESC LIMIT 50', id),
+    ]);
+    res.json({ ...data, verifications, history });
   });
 
   // ?version=original returns the scan exactly as uploaded; default is the scan + QR page.
-  router.get('/certificates/:id/file', (req, res) => {
-    const row = db
-      .prepare('SELECT id, document_type, original, stamped FROM certificates WHERE id = ?')
-      .get(normalizeId(req.params.id));
-    if (!row) return res.status(404).json({ error: 'Certificate not found.' });
+  router.get('/certificates/:id/file', async (req, res) => {
     const original = req.query.version === 'original';
+    const row = await db.get(
+      `SELECT id, document_type, ${original ? 'original' : 'stamped'} AS file FROM certificates WHERE id = ?`,
+      normalizeId(req.params.id),
+    );
+    if (!row) return res.status(404).json({ error: 'Certificate not found.' });
     const ext = { 'application/pdf': 'pdf', 'image/jpeg': 'jpg', 'image/png': 'png' }[row.document_type];
     res.set('Content-Type', original ? row.document_type : 'application/pdf');
     res.set(
       'Content-Disposition',
       `${req.query.inline ? 'inline' : 'attachment'}; filename="${row.id}${original ? `-original.${ext}` : '-verified.pdf'}"`,
     );
-    res.send(Buffer.from(original ? row.original : row.stamped));
+    res.send(Buffer.from(row.file));
   });
 
-  router.post('/certificates/:id/revoke', (req, res) => {
+  router.post('/certificates/:id/revoke', async (req, res) => {
     const id = normalizeId(req.params.id);
     const reason = String(req.body?.reason ?? '').trim().slice(0, 300);
     if (!reason) return res.status(400).json({ error: 'A reason is required to revoke a certificate.' });
-    const row = db.prepare('SELECT status FROM certificates WHERE id = ?').get(id);
+    const row = await db.get('SELECT status FROM certificates WHERE id = ?', id);
     if (!row) return res.status(404).json({ error: 'Certificate not found.' });
     if (row.status === 'revoked') return res.status(409).json({ error: 'Certificate is already revoked.' });
-    db.prepare(
+    await db.run(
       `UPDATE certificates SET status = 'revoked', revoked_at = ?, revoke_reason = ?, revoked_by = ? WHERE id = ?`,
-    ).run(new Date().toISOString(), reason, req.user.email, id);
-    audit(db, { action: 'revoke', certId: id, detail: reason, actor: req.user.email, ip: req.ip });
+      new Date().toISOString(),
+      reason,
+      req.user.email,
+      id,
+    );
+    await audit(db, { action: 'revoke', certId: id, detail: reason, actor: req.user.email, ip: req.ip });
     res.json({ ok: true });
   });
 
   // ---- Public verification activity (live feed for the registrar) ----
-  router.get('/verifications', (req, res) => {
+  router.get('/verifications', async (req, res) => {
     const after = Number(req.query.after) || 0;
     const verdict = req.query.verdict ? String(req.query.verdict) : null;
     const certId = req.query.certId ? normalizeId(req.query.certId) : null;
     const q = req.query.q ? `%${norm(req.query.q).toLowerCase()}%` : null;
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
-    const rows = db
-      .prepare(
+    const [rows, latest] = await Promise.all([
+      db.all(
         `SELECT * FROM verifications
          WHERE id > ?
            AND (? IS NULL OR verdict = ?)
            AND (? IS NULL OR cert_id = ?)
            AND (? IS NULL OR lower(verifier_name) LIKE ? OR lower(verifier_org) LIKE ? OR lower(cert_id) LIKE ?)
          ORDER BY id DESC LIMIT ?`,
-      )
-      .all(after, verdict, verdict, certId, certId, q, q, q, q, limit);
-    const latestId = db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM verifications').get().id;
-    res.json({ verifications: rows, latestId });
+        after,
+        verdict,
+        verdict,
+        certId,
+        certId,
+        q,
+        q,
+        q,
+        q,
+        limit,
+      ),
+      db.get('SELECT COALESCE(MAX(id), 0) AS id FROM verifications'),
+    ]);
+    res.json({ verifications: rows, latestId: latest.id });
   });
 
-  router.get('/verifications/count', (req, res) => {
+  router.get('/verifications/count', async (req, res) => {
     const after = Number(req.query.after) || 0;
-    const r = db
-      .prepare('SELECT COUNT(*) AS n, COALESCE(MAX(id), 0) AS latest FROM verifications WHERE id > ?')
-      .get(after);
-    const latestId = r.latest || db.prepare('SELECT COALESCE(MAX(id), 0) AS id FROM verifications').get().id;
-    res.json({ newCount: r.n, latestId });
+    const r = await db.get(
+      `SELECT COALESCE(SUM(id > ?), 0) AS n, COALESCE(MAX(id), 0) AS latest FROM verifications`,
+      after,
+    );
+    res.json({ newCount: r.n, latestId: r.latest });
   });
 
-  router.get('/audit', (req, res) => {
+  router.get('/audit', async (req, res) => {
     const action = req.query.action ? String(req.query.action) : null;
     const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
-    const rows = db
-      .prepare('SELECT * FROM audit_events WHERE (? IS NULL OR action = ?) ORDER BY id DESC LIMIT ?')
-      .all(action, action, limit);
+    const rows = await db.all(
+      'SELECT * FROM audit_events WHERE (? IS NULL OR action = ?) ORDER BY id DESC LIMIT ?',
+      action,
+      action,
+      limit,
+    );
     res.json({ events: rows });
   });
 

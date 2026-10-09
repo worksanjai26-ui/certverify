@@ -17,10 +17,10 @@ if (!['record', 'file', 'export'].includes(mode) || !id) {
   process.exit(1);
 }
 
-const db = openDb(config.dataDir);
-const row = db.prepare('SELECT id, payload, stamped FROM certificates WHERE id = ?').get(id);
+const db = await openDb(config);
+const row = await db.get('SELECT id, payload, stamped FROM certificates WHERE id = ?', id);
 if (!row) {
-  console.error(`No certificate ${id} in ${config.dataDir}`);
+  console.error(`No certificate ${id} in ${config.databaseUrl ? 'the Turso database' : config.dataDir}`);
   process.exit(1);
 }
 
@@ -32,13 +32,15 @@ if (mode === 'record') {
     const value = rest.join('=');
     payload[key] = value !== '' && !Number.isNaN(Number(value)) ? Number(value) : value;
   }
-  db.prepare('UPDATE certificates SET payload = ? WHERE id = ?').run(canonicalize(payload), id);
+  await db.run('UPDATE certificates SET payload = ? WHERE id = ?', canonicalize(payload), id);
   console.log(`Edited registry record ${id}: ${changes.join(', ')} (signature left unchanged).`);
 } else {
   const out = path.join(config.dataDir, mode === 'file' ? `${id}-tampered.pdf` : `${id}-verified.pdf`);
   let bytes = Buffer.from(row.stamped);
   // Appending a comment keeps the PDF readable but changes its SHA-256 completely.
   if (mode === 'file') bytes = Buffer.concat([bytes, Buffer.from('\n% edited after issue\n')]);
+  fs.mkdirSync(path.dirname(out), { recursive: true });
   fs.writeFileSync(out, bytes);
   console.log(`Wrote ${out}`);
 }
+db.close();

@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { pathToFileURL } from 'node:url';
 import { hashPassword } from './crypto.js';
 
 const SCHEMA = `
@@ -65,29 +65,54 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS audit_cert ON audit_events(cert_id);
 `;
 
-export function openDb(dataDir) {
-  fs.mkdirSync(dataDir, { recursive: true });
-  const db = new DatabaseSync(path.join(dataDir, 'certverify.db'));
-  db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;');
-  db.exec(SCHEMA);
-  return db;
+const toObjects = (rs) => rs.rows.map((row) => Object.fromEntries(rs.columns.map((c, i) => [c, row[i]])));
+
+// Thin async wrapper so the rest of the code reads `await db.get(sql, ...args)`.
+function wrap(client) {
+  const exec = (sql, args) => client.execute({ sql, args: args.map((a) => a ?? null) });
+  return {
+    get: async (sql, ...args) => toObjects(await exec(sql, args))[0],
+    all: async (sql, ...args) => toObjects(await exec(sql, args)),
+    run: (sql, ...args) => exec(sql, args),
+    close: () => client.close(),
+  };
 }
 
-export function seed(db, cfg) {
-  if (db.prepare('SELECT COUNT(*) AS n FROM users').get().n === 0) {
-    db.prepare('INSERT INTO users (email, name, password_hash, created_at) VALUES (?, ?, ?, ?)').run(
+// Turso in production (TURSO_DATABASE_URL); a local SQLite file otherwise. Same SQL either way.
+export async function openDb(cfg) {
+  let url = cfg.databaseUrl;
+  if (!url) {
+    if (cfg.onVercel) throw new Error('TURSO_DATABASE_URL is not set. Vercel has no persistent disk for a local database.');
+    fs.mkdirSync(cfg.dataDir, { recursive: true });
+    url = pathToFileURL(path.join(cfg.dataDir, 'certverify.db')).href;
+  }
+  const local = url.startsWith('file:');
+  // The web client is pure fetch, so serverless bundles need no native binaries.
+  const { createClient } = await import(local ? '@libsql/client' : '@libsql/client/web');
+  const client = createClient({ url, authToken: cfg.databaseAuthToken ?? undefined });
+  if (local) await client.execute('PRAGMA journal_mode = WAL');
+  await client.executeMultiple(SCHEMA);
+  return wrap(client);
+}
+
+export async function seed(db, cfg) {
+  if ((await db.get('SELECT COUNT(*) AS n FROM users')).n === 0) {
+    // OR IGNORE: two cold-starting instances may both get here.
+    const r = await db.run(
+      'INSERT OR IGNORE INTO users (email, name, password_hash, created_at) VALUES (?, ?, ?, ?)',
       cfg.adminEmail,
       'Registrar',
       hashPassword(cfg.adminPassword),
       new Date().toISOString(),
     );
-    console.log(`[seed] created registrar account ${cfg.adminEmail} (password from ADMIN_PASSWORD / .env.example)`);
+    if (r.rowsAffected) console.log(`[seed] created registrar account ${cfg.adminEmail} (password from ADMIN_PASSWORD)`);
   }
 }
 
 // Registrar actions (sign-in, uploads, revocations). Public checks go to `verifications`.
 export function audit(db, { action, certId = null, detail = null, actor = null, ip = null }) {
-  db.prepare('INSERT INTO audit_events (at, action, cert_id, detail, actor, ip) VALUES (?, ?, ?, ?, ?, ?)').run(
+  return db.run(
+    'INSERT INTO audit_events (at, action, cert_id, detail, actor, ip) VALUES (?, ?, ?, ?, ?, ?)',
     new Date().toISOString(),
     action,
     certId ?? null,

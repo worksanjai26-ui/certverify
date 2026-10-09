@@ -8,7 +8,8 @@ import path from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import QRCode from 'qrcode';
 import { createApp } from '../src/app.js';
-import { canonicalize, sha256 } from '../src/crypto.js';
+import { canonicalize, loadKeys, privateKeyPath, sha256 } from '../src/crypto.js';
+import { openDb } from '../src/db.js';
 
 let ctx, server, base, token;
 const VERIFIER = { verifierName: 'Priya Shah', verifierOrganization: 'Acme Hiring Ltd', verifierEmail: 'priya@acme.test' };
@@ -68,7 +69,7 @@ const qrFields = (qrText) => {
 
 before(async () => {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'certverify-test-'));
-  ctx = createApp({ dataDir, publicUrl: 'http://portal.test' });
+  ctx = await createApp({ dataDir, publicUrl: 'http://portal.test' });
   server = ctx.app.listen(0);
   await once(server, 'listening');
   base = `http://127.0.0.1:${server.address().port}/api`;
@@ -193,9 +194,9 @@ describe('public verification', () => {
 
   test('registry edits without re-signing give Invalid signature and hide details', async () => {
     const r = await register(await scannedPdf('K'));
-    const row = ctx.db.prepare('SELECT payload FROM certificates WHERE id = ?').get(r.certificate.id);
+    const row = await ctx.db.get('SELECT payload FROM certificates WHERE id = ?', r.certificate.id);
     const forged = canonicalize({ ...JSON.parse(row.payload), studentName: 'Someone Else' });
-    ctx.db.prepare('UPDATE certificates SET payload = ? WHERE id = ?').run(forged, r.certificate.id);
+    await ctx.db.run('UPDATE certificates SET payload = ? WHERE id = ?', forged, r.certificate.id);
     const res = await verify(qrFields(r.qrText));
     assert.equal(res.data.verdict, 'invalid_signature');
     assert.equal(res.data.certificate, undefined);
@@ -212,6 +213,38 @@ describe('public verification', () => {
   test('verifier name and organisation are required', async () => {
     const res = await call('POST', '/verify', { form: formOf({ certificateId: 'DEG-CSE-2026-001' }), auth: false });
     assert.equal(res.status, 400);
+  });
+});
+
+describe('deployment configuration', () => {
+  test('the signing key can come from INSTITUTION_PRIVATE_KEY as PEM or base64', async () => {
+    const pem = fs.readFileSync(privateKeyPath(ctx.cfg.dataDir), 'utf8');
+    for (const value of [pem, pem.replace(/\n/g, '\\n'), Buffer.from(pem).toString('base64')]) {
+      const keys = loadKeys({ privateKey: value, onVercel: true });
+      assert.equal(keys.keyId, ctx.keys.keyId, 'same key, so existing signatures keep verifying');
+    }
+  });
+
+  test('on Vercel, missing key or database settings fail loudly instead of using temporary storage', async () => {
+    assert.throws(() => loadKeys({ onVercel: true }), /INSTITUTION_PRIVATE_KEY/);
+    await assert.rejects(openDb({ onVercel: true }), /TURSO_DATABASE_URL/);
+  });
+
+  test('uploads over the size limit get a clear 413', async () => {
+    const small = await createApp({ dataDir: ctx.cfg.dataDir, maxUploadMb: 0.01 });
+    const s = small.app.listen(0);
+    await once(s, 'listening');
+    try {
+      const res = await fetch(`http://127.0.0.1:${s.address().port}/api/verify`, {
+        method: 'POST',
+        body: formOf({ ...VERIFIER, certificateId: 'DEG-CSE-2026-001' }, Buffer.alloc(50_000)),
+      });
+      assert.equal(res.status, 413);
+      assert.match((await res.json()).error, /larger than/);
+    } finally {
+      s.close();
+      small.db.close();
+    }
   });
 });
 

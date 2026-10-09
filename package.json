@@ -2,6 +2,10 @@
   "name": "certverify",
   "private": true,
   "description": "Digital degree certificate issuing and verification portal",
+  "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "workspaces": [
     "backend",
     "frontend"
@@ -12,7 +16,8 @@
     "start": "npm start -w backend",
     "test": "npm test -w backend",
     "tamper": "npm run tamper -w backend --",
-    "sample": "npm run sample -w backend --"
+    "sample": "npm run sample -w backend --",
+    "key:export": "npm run key:export -w backend --silent"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

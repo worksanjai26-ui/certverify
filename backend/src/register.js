@@ -1,9 +1,9 @@
 import { canonicalize, sha256, signPayload } from './crypto.js';
 import { buildVerifiedPdf } from './stamp.js';
 
-function nextId(db, department, year) {
+async function nextId(db, department, year) {
   const prefix = `DEG-${department}-${year}-`;
-  const last = db.prepare('SELECT id FROM certificates WHERE id LIKE ? ORDER BY id DESC LIMIT 1').get(`${prefix}%`);
+  const last = await db.get('SELECT id FROM certificates WHERE id LIKE ? ORDER BY id DESC LIMIT 1', `${prefix}%`);
   const n = last ? Number(last.id.slice(prefix.length)) + 1 : 1;
   return `${prefix}${String(n).padStart(3, '0')}`;
 }
@@ -14,8 +14,10 @@ export const verifyUrlFor = (cfg, id) => `${cfg.publicUrl}/verify/${id}`;
 export const qrTextFor = (cfg, id, documentHash, signature) =>
   `${verifyUrlFor(cfg, id)}?h=${documentHash}&s=${signature}`;
 
-async function register({ db, keys, cfg }, { file, type, fileName, details, actor }) {
-  const id = nextId(db, details.department, details.graduationYear);
+const isUniqueViolation = (e, column) => /UNIQUE constraint failed/i.test(e?.message) && e.message.includes(column);
+
+async function registerOnce({ db, keys, cfg }, { file, type, fileName, details, actor }) {
+  const id = await nextId(db, details.department, details.graduationYear);
   const documentHash = sha256(file);
   const issuedAt = new Date().toISOString();
   const payload = canonicalize({
@@ -48,11 +50,10 @@ async function register({ db, keys, cfg }, { file, type, fileName, details, acto
     qrTextFor(cfg, id, documentHash, signature),
   );
 
-  db.prepare(
+  await db.run(
     `INSERT INTO certificates (id, student_name, roll_no, program, department, graduation_year, payload, signature, key_id,
        document_hash, document_type, document_name, original, stamped_hash, stamped, status, issued_at, issued_by)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-  ).run(
     id,
     details.studentName,
     details.rollNo,
@@ -74,7 +75,24 @@ async function register({ db, keys, cfg }, { file, type, fileName, details, acto
   return id;
 }
 
-// Serialise registrations so two uploads can't claim the same sequence number.
+// Another server instance may claim the same sequence number between our read and insert.
+// The ID is printed inside the PDF, so on a clash we redo the whole thing with the next number.
+async function register(ctx, input) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await registerOnce(ctx, input);
+    } catch (e) {
+      if (isUniqueViolation(e, 'document_hash')) {
+        const err = new Error('This exact file is already registered.');
+        err.status = 409;
+        throw err;
+      }
+      if (!isUniqueViolation(e, 'certificates.id') || attempt >= 5) throw e;
+    }
+  }
+}
+
+// Within one instance, serialise registrations so they don't race each other at all.
 let queue = Promise.resolve();
 export function registerCertificate(ctx, input) {
   const run = queue.then(() => register(ctx, input));

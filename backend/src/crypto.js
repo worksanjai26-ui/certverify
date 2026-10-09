@@ -18,19 +18,36 @@ export function canonicalize(value) {
   return JSON.stringify(value ?? null);
 }
 
-// Institution signing key (Ed25519). Generated once; the private key never leaves the server.
-export function loadKeys(dataDir) {
-  const dir = path.join(dataDir, 'keys');
-  const privPath = path.join(dir, 'institution-private.pem');
-  const pubPath = path.join(dir, 'institution-public.pem');
+export const privateKeyPath = (dataDir) => path.join(dataDir, 'keys', 'institution-private.pem');
+
+// Accepts the PEM itself (with real or \n-escaped newlines) or base64 of the PEM.
+export function parsePrivateKey(value) {
+  const pem = value.includes('BEGIN') ? value.replace(/\\n/g, '\n') : Buffer.from(value, 'base64').toString('utf8');
+  const key = crypto.createPrivateKey(pem);
+  if (key.asymmetricKeyType !== 'ed25519') throw new Error('INSTITUTION_PRIVATE_KEY must be an Ed25519 private key.');
+  return key;
+}
+
+// Local development: generate once into dataDir.
+export function loadOrCreateKeyFile(dataDir) {
+  const privPath = privateKeyPath(dataDir);
   if (!fs.existsSync(privPath)) {
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(path.dirname(privPath), { recursive: true });
     const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
     fs.writeFileSync(privPath, privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 });
-    fs.writeFileSync(pubPath, publicKey.export({ type: 'spki', format: 'pem' }));
-    console.log(`[keys] generated new institution key pair in ${dir}`);
+    fs.writeFileSync(path.join(path.dirname(privPath), 'institution-public.pem'), publicKey.export({ type: 'spki', format: 'pem' }));
+    console.log(`[keys] generated new institution key pair in ${path.dirname(privPath)}`);
   }
-  const privateKey = crypto.createPrivateKey(fs.readFileSync(privPath));
+  return crypto.createPrivateKey(fs.readFileSync(privPath));
+}
+
+// Institution signing key (Ed25519). The private key never leaves the server. In production it comes
+// from INSTITUTION_PRIVATE_KEY: it must stay the same forever, or every earlier signature stops verifying.
+export function loadKeys(cfg) {
+  let privateKey;
+  if (cfg.privateKey) privateKey = parsePrivateKey(cfg.privateKey);
+  else if (cfg.onVercel) throw new Error('INSTITUTION_PRIVATE_KEY is not set. Run `npm run key:export` locally and add it in Vercel.');
+  else privateKey = loadOrCreateKeyFile(cfg.dataDir);
   const publicKey = crypto.createPublicKey(privateKey);
   const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
   const digest = sha256(publicKey.export({ type: 'spki', format: 'der' }));

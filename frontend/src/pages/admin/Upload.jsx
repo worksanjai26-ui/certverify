@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api, downloadCertificateFile, openCertificateFile } from '../../api.js';
+import { useInstitution } from '../../components/Layouts.jsx';
 import { CopyButton, ErrorBox, FileDrop } from '../../components/ui.jsx';
 
 const BLANK = {
@@ -11,7 +12,6 @@ const BLANK = {
   graduationYear: String(new Date().getFullYear()),
 };
 const ACCEPT = 'application/pdf,.pdf,image/jpeg,.jpg,.jpeg,image/png,.png';
-const MAX_BYTES = 15 * 1024 * 1024;
 
 function ScanPreview({ file }) {
   const [url, setUrl] = useState(null);
@@ -34,6 +34,8 @@ export default function Upload() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [done, setDone] = useState(null);
+  // The server's limit (4 MB on Vercel, 15 MB locally).
+  const maxMb = useInstitution()?.maxUploadMb ?? 4;
 
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
 
@@ -43,8 +45,8 @@ export default function Upload() {
       setError(new Error('Upload the scan as a PDF, JPG or PNG.'));
       return;
     }
-    if (f.size > MAX_BYTES) {
-      setError(new Error('The scan is larger than 15 MB. Scan at 200–300 dpi or compress it.'));
+    if (f.size > maxMb * 1024 * 1024) {
+      setError(new Error(`The scan is larger than ${maxMb} MB. Scan at 150–200 dpi or compress the PDF.`));
       return;
     }
     setFile(f);
@@ -165,7 +167,7 @@ export default function Upload() {
               onFile={pick}
               accept={ACCEPT}
               title="Drop the scanned degree certificate here"
-              hint="PDF, JPG or PNG, up to 15 MB"
+              hint={`PDF, JPG or PNG, up to ${maxMb} MB`}
             />
           )}
         </div>
