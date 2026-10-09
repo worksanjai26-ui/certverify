@@ -8,6 +8,7 @@ import { ACCEPTED_TYPES, detectType } from '../stamp.js';
 import { normalizeId } from '../verify.js';
 
 const norm = (s) => String(s ?? '').normalize('NFKC').trim().replace(/\s+/g, ' ');
+const alertJson = (a) => ({ ...a, findings: JSON.parse(a.findings || '[]') });
 
 // Columns for lists and detail views; leaves out the two file blobs.
 const CERT_COLUMNS = `id, payload, signature, key_id, document_hash, document_type, document_name, stamped_hash,
@@ -100,7 +101,7 @@ export function adminRouter(ctx) {
   router.get('/stats', async (req, res) => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
-    const [certificates, verifications, verdicts] = await Promise.all([
+    const [certificates, verifications, verdicts, alerts] = await Promise.all([
       db.get(
         `SELECT COUNT(*) AS total,
                 COALESCE(SUM(status = 'active'), 0) AS active,
@@ -115,8 +116,13 @@ export function adminRouter(ctx) {
         startOfDay.toISOString(),
       ),
       db.all('SELECT verdict, COUNT(*) AS n FROM verifications GROUP BY verdict ORDER BY n DESC'),
+      db.get(
+        `SELECT COUNT(*) AS total, COALESCE(SUM(acknowledged_at IS NULL), 0) AS open,
+                COALESCE(SUM(acknowledged_at IS NULL AND severity = 'high'), 0) AS openHigh
+         FROM alerts`,
+      ),
     ]);
-    res.json({ certificates, verifications, verdicts });
+    res.json({ certificates, verifications, verdicts, alerts });
   });
 
   // ---- Certificates ----
@@ -179,11 +185,12 @@ export function adminRouter(ctx) {
     const data = await certificateResponse(normalizeId(req.params.id));
     if (!data) return res.status(404).json({ error: 'Certificate not found.' });
     const id = data.certificate.id;
-    const [verifications, history] = await Promise.all([
+    const [verifications, history, alerts] = await Promise.all([
       db.all('SELECT * FROM verifications WHERE cert_id = ? ORDER BY id DESC LIMIT 200', id),
       db.all('SELECT * FROM audit_events WHERE cert_id = ? ORDER BY id DESC LIMIT 50', id),
+      db.all('SELECT * FROM alerts WHERE cert_id = ? ORDER BY id DESC LIMIT 50', id),
     ]);
-    res.json({ ...data, verifications, history });
+    res.json({ ...data, verifications, history, alerts: alerts.map(alertJson) });
   });
 
   // ?version=original returns the scan exactly as uploaded; default is the scan + QR page.
@@ -259,6 +266,51 @@ export function adminRouter(ctx) {
       after,
     );
     res.json({ newCount: r.n, latestId: r.latest });
+  });
+
+  // ---- Malpractice alerts ----
+  router.get('/alerts', async (req, res) => {
+    const status = ['open', 'acknowledged'].includes(req.query.status) ? req.query.status : 'all';
+    const certId = req.query.certId ? normalizeId(req.query.certId) : null;
+    const limit = Math.min(Math.max(Number(req.query.limit) || 200, 1), 1000);
+    const rows = await db.all(
+      `SELECT * FROM alerts
+       WHERE (? = 'all' OR (? = 'open' AND acknowledged_at IS NULL) OR (? = 'acknowledged' AND acknowledged_at IS NOT NULL))
+         AND (? IS NULL OR cert_id = ?)
+       ORDER BY id DESC LIMIT ?`,
+      status,
+      status,
+      status,
+      certId,
+      certId,
+      limit,
+    );
+    res.json({ alerts: rows.map(alertJson) });
+  });
+
+  router.get('/alerts/count', async (req, res) => {
+    const r = await db.get(
+      `SELECT COALESCE(SUM(acknowledged_at IS NULL), 0) AS open,
+              COALESCE(SUM(acknowledged_at IS NULL AND severity = 'high'), 0) AS openHigh,
+              COALESCE(MAX(id), 0) AS latestId
+       FROM alerts`,
+    );
+    res.json(r);
+  });
+
+  router.post('/alerts/:id/ack', async (req, res) => {
+    const id = Number(req.params.id);
+    const note = String(req.body?.note ?? '').trim().slice(0, 500) || null;
+    const r = await db.run(
+      'UPDATE alerts SET acknowledged_at = ?, acknowledged_by = ?, note = ? WHERE id = ? AND acknowledged_at IS NULL',
+      new Date().toISOString(),
+      req.user.email,
+      note,
+      id,
+    );
+    if (!r.rowsAffected) return res.status(404).json({ error: 'Alert not found or already acknowledged.' });
+    await audit(db, { action: 'alert_ack', detail: `Alert #${id}${note ? `: ${note}` : ''}`, actor: req.user.email, ip: req.ip });
+    res.json({ ok: true });
   });
 
   router.get('/audit', async (req, res) => {

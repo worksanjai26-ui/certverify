@@ -6,3 +6,4 @@ backend/data/
 .vercel/
 .vercel
 .env*
+frontend/dist-*/

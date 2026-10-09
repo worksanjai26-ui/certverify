@@ -44,7 +44,27 @@ export default function Dashboard() {
         </Link>
       </div>
 
+      {stats.alerts.open > 0 && (
+        <div className="alert-banner" role="alert">
+          <span>
+            ⚠ {stats.alerts.open} open malpractice alert{stats.alerts.open === 1 ? '' : 's'}
+            {stats.alerts.openHigh > 0 && ` (${stats.alerts.openHigh} high severity)`}: tampered or forged documents were
+            presented for verification.
+          </span>
+          <Link className="btn danger sm" to="/admin/alerts">
+            Review alerts
+          </Link>
+        </div>
+      )}
+
       <div className="grid grid-4">
+        <div className="card stat">
+          <div className="label">Open malpractice alerts</div>
+          <div className="value" style={{ color: stats.alerts.open ? 'var(--bad)' : 'var(--ok)' }}>
+            {stats.alerts.open}
+          </div>
+          <div className="small muted">{stats.alerts.total} raised in total</div>
+        </div>
         <div className="card stat">
           <div className="label">Certificates registered</div>
           <div className="value">{stats.certificates.total}</div>

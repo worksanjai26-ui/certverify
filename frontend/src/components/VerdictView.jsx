@@ -33,6 +33,12 @@ export const VERDICTS = {
     title: 'Tampered',
     lead: "What you supplied doesn't match the document the institution registered. It has been altered or copied.",
   },
+  review: {
+    tone: 'warn',
+    icon: '◐',
+    title: 'Needs visual check',
+    lead: 'The QR code is genuine, but this copy is a scan or photo, so its pages cannot be compared automatically. Compare it with the registered copy.',
+  },
   unable: {
     tone: 'muted',
     icon: '…',
@@ -100,12 +106,107 @@ function HashRow({ label, value, compareTo }) {
   );
 }
 
+const SEVERITY = {
+  high: { label: 'Malpractice', tone: 'bad' },
+  medium: { label: 'Warning', tone: 'warn' },
+  info: { label: 'Note', tone: 'muted' },
+};
+
+// The "output area": what was found, in plain words, worst first.
+export function Findings({ result }) {
+  const order = { high: 0, medium: 1, info: 2 };
+  const items = [...(result.findings ?? [])].sort((a, b) => order[a.severity] - order[b.severity]);
+  if (!items.length) return null;
+  return (
+    <div className={`card findings${result.malpractice ? ' malpractice' : ''}`}>
+      <div className="card-title">{result.malpractice ? '⚠ Malpractice detected' : 'Notes'}</div>
+      <ul className="finding-list">
+        {items.map((f, i) => (
+          <li key={i}>
+            <span className={`badge tone-${SEVERITY[f.severity].tone}`}>{SEVERITY[f.severity].label}</span>
+            <span>{f.message}</span>
+          </li>
+        ))}
+      </ul>
+      {result.malpractice && (
+        <p className="small" style={{ margin: '12px 0 0' }}>
+          <strong>The institution's registrar has been notified</strong>
+          {result.alertId ? ` (alert #${result.alertId})` : ''}. Do not accept this document.
+        </p>
+      )}
+    </div>
+  );
+}
+
+const PAGE_STATUS = {
+  match: { label: 'Matches', tone: 'ok' },
+  altered: { label: 'Modified', tone: 'bad' },
+  missing: { label: 'Missing', tone: 'bad' },
+  extra: { label: 'Added', tone: 'bad' },
+};
+const PAGE_ROLE = { certificate: 'Certificate (scan)', verification: 'Verification page (QR)', extra: 'Not in registered copy' };
+
+// Uploaded document vs registered copy, page by page.
+export function DocumentComparison({ result }) {
+  const d = result.document;
+  if (!d) return null;
+  const located = d.locator
+    ? `Found ${d.locator.id ?? 'a QR code'} from the ${d.locator.source === 'qr' ? 'QR code' : 'printed details'} on page ${d.locator.page}.`
+    : 'No CertVerify QR code was found in the document.';
+  return (
+    <div className="card">
+      <div className="card-title">Your document vs. the registered copy</div>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        {d.kind === 'pdf' ? `PDF, ${d.pageCount} page${d.pageCount === 1 ? '' : 's'}.` : d.kind === 'image' ? 'Image file.' : 'Unrecognised file.'}{' '}
+        {located}
+      </p>
+      {d.comparison?.identicalFile && (
+        <div className="success-box">Byte-for-byte identical to the copy the registrar issued.</div>
+      )}
+      {d.comparison?.rows?.length > 0 && (
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Page</th>
+                <th>Registered as</th>
+                <th>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {d.comparison.rows.map((r) => (
+                <tr key={r.page}>
+                  <td>{r.page}</td>
+                  <td>{PAGE_ROLE[r.role]}</td>
+                  <td>
+                    <span className={`badge tone-${PAGE_STATUS[r.status].tone}`}>{PAGE_STATUS[r.status].label}</span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      {result.registeredCopyUrl && (
+        <div className="row" style={{ marginTop: 14 }}>
+          <a className="btn ghost sm" href={result.registeredCopyUrl} target="_blank" rel="noreferrer">
+            Open the registered copy ↗
+          </a>
+          <span className="small muted">Compare it side by side with the document you were given. Link valid for 30 minutes.</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function VerdictView({ result }) {
   const c = result.certificate;
   const e = result.evidence;
   return (
     <div className="stack">
       <VerdictBanner verdict={result.verdict} certificateId={result.certificateId} checkedAt={result.checkedAt} />
+      <Findings result={result} />
+      <DocumentComparison result={result} />
 
       <div className="grid grid-2">
         <div className="card">

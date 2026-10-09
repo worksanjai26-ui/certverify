@@ -53,6 +53,29 @@ CREATE TABLE IF NOT EXISTS verifications (
   user_agent TEXT
 );
 CREATE INDEX IF NOT EXISTS verifications_cert ON verifications(cert_id);
+-- Raised when a verification finds malpractice; the registrar acknowledges them in the admin panel.
+CREATE TABLE IF NOT EXISTS alerts (
+  id INTEGER PRIMARY KEY,
+  at TEXT NOT NULL,
+  verification_id INTEGER,
+  cert_id TEXT,
+  verdict TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  title TEXT NOT NULL,
+  findings TEXT NOT NULL,             -- JSON array of { severity, code, message }
+  verifier_name TEXT,
+  verifier_org TEXT,
+  verifier_email TEXT,
+  ip TEXT,
+  acknowledged_at TEXT,
+  acknowledged_by TEXT,
+  note TEXT
+);
+CREATE INDEX IF NOT EXISTS alerts_open ON alerts(acknowledged_at);
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS audit_events (
   id INTEGER PRIMARY KEY,
   at TEXT NOT NULL,
@@ -92,7 +115,27 @@ export async function openDb(cfg) {
   const client = createClient({ url, authToken: cfg.databaseAuthToken ?? undefined });
   if (local) await client.execute('PRAGMA journal_mode = WAL');
   await client.executeMultiple(SCHEMA);
+  await migrate(client);
   return wrap(client);
+}
+
+// Columns added after the first release; existing databases get them on startup.
+const ADDED_COLUMNS = [
+  ['verifications', 'malpractice', 'INTEGER NOT NULL DEFAULT 0'],
+  ['verifications', 'findings', 'TEXT'],
+];
+
+async function migrate(client) {
+  for (const [table, column, type] of ADDED_COLUMNS) {
+    const cols = await client.execute(`PRAGMA table_info(${table})`);
+    if (!cols.rows.some((r) => r[1] === column)) {
+      try {
+        await client.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+      } catch (e) {
+        if (!/duplicate column/i.test(e.message)) throw e; // another instance got there first
+      }
+    }
+  }
 }
 
 export async function seed(db, cfg) {

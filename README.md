@@ -1,4 +1,4 @@
-# CertVerify: Digital Degree Certificate Verification
+﻿# CertVerify: Digital Degree Certificate Verification
 
 The college registrar **uploads the scanned copy of a degree certificate**. The portal then does the following:
 
@@ -41,7 +41,7 @@ on `/scan`, works anywhere.
 npm test
 ```
 
-20 end-to-end tests run against a real server and a throwaway database.
+33 end-to-end tests run against a real server and a throwaway database.
 
 ## Deploy to Vercel
 
@@ -49,42 +49,28 @@ Vercel has no permanent disk, so production storage lives elsewhere:
 
 | What | Where in production | Env var |
 | ---- | ------------------- | ------- |
-| Database (certificates, scans, verifications, sessions) | Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` |
-| Institution signing key | Vercel secret env var | `INSTITUTION_PRIVATE_KEY` |
-| Registrar login (created on first request) | — | `ADMIN_EMAIL`, `ADMIN_PASSWORD` |
+| Database (certificates, scans, verifications, alerts, sessions) | Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` (**required**) |
+| Institution signing key | generated once on first start and kept in the database; or your own | `INSTITUTION_PRIVATE_KEY` (optional) |
+| Registrar login (created on first request) | defaults to the seed login in `backend/.env.example` | `ADMIN_EMAIL`, `ADMIN_PASSWORD` (optional) |
 
-**1. Create the Turso database.** The easiest route is Vercel → *Storage* → *Create* → **Turso** (Marketplace), which
-creates the database and adds `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` to the project for you. Alternatively, sign up at
-turso.tech, create a database, then copy its URL (`libsql://…`) and create a token.
+**1. Create the Turso database.** In the project folder, run `npx vercel integration add tursocloud`, or go to
+Vercel â†’ *Storage* â†’ *Create* â†’ **Turso**. Either way, the database is created and `TURSO_DATABASE_URL` and
+`TURSO_AUTH_TOKEN` are added to the project.
 
-**2. Export the signing key** on your machine:
+**2. Deploy.** Run `npx vercel deploy --prod`, or import the GitHub repo into Vercel. Then open
+`https://<project>.vercel.app/admin`, sign in, and upload a certificate.
 
-```bash
-npm run key:export
-```
-
-It prints one long line. That line is the college's private key: anyone holding it can sign certificates. Keep a safe
-copy offline. If it's lost or changed, every certificate already issued stops verifying.
-
-**3. Import the repo into Vercel.** Go to vercel.com → *Add New → Project* → pick the GitHub repo. Keep the root
-directory as `/`; `vercel.json` sets the build. Before deploying, add these Environment Variables:
-
-| Name | Value |
-| ---- | ----- |
-| `INSTITUTION_PRIVATE_KEY` | the line from step 2 (mark as *Sensitive*) |
-| `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` | from step 1, unless the integration added them |
-| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | the registrar login, with a **strong** password |
-| `INSTITUTION_NAME` | optional; printed on the verification page |
-| `PUBLIC_URL` | optional; defaults to the project's production domain. Set it if you use a custom domain |
-
-**4. Deploy.** Then open `https://<project>.vercel.app/admin`, sign in, and upload a certificate.
+**Optional settings:**
+- `INSTITUTION_PRIVATE_KEY`: bring your own signing key (`npm run key:export` prints the local one). Otherwise the server generates one into the database the first time it starts. Keeping the key in an env var is safer, because a database leak then doesn't expose it.
+- `ADMIN_EMAIL` and `ADMIN_PASSWORD`: the registrar login. Without them, the seed login from `.env.example` is used. That login is public on GitHub, so set your own before real use.
+- `INSTITUTION_NAME` and `PUBLIC_URL`: `PUBLIC_URL` defaults to the production domain.
 
 Limits on Vercel:
-- **Scan size:** uploads are capped at **4 MB**, because Vercel rejects request bodies over 4.5 MB. Scan at 150–200 dpi or compress the PDF.
+- **Scan size:** uploads are capped at **4 MB**, because Vercel rejects request bodies over 4.5 MB. Scan at 150â€“200 dpi or compress the PDF.
 - **QR address:** QR codes point at `PUBLIC_URL`. Certificates issued before a domain change keep the old link.
 - **Login lockout:** the failed-login counter is kept separately by each server instance.
 
-If the site shows "The server is not configured correctly", open *Vercel → Project → Logs*. The first line names the
+If the site shows "The server is not configured correctly", open *Vercel â†’ Project â†’ Logs*. The first line names the
 missing variable.
 
 ## The flow
@@ -102,25 +88,47 @@ missing variable.
    - stores the original scan, the verified PDF and the signed record. Uploading the same scan twice is refused.
 4. The registrar downloads the **verified PDF** (scan + QR page) and gives it to the student.
 
-### Employer: verify (public page)
+### Employer: verify the document (public page)
 
-The employer can scan the QR code (phone camera or `/scan`), type the certificate ID, or drop the PDF.
-Before the check runs, they enter their **name and organisation** (email optional), which the registrar will see.
+The main path is to **upload the certificate you were given**. Typing the ID or scanning the QR still works, but it
+only proves that the record exists. Before the check runs, the employer enters their **name and organisation** (email
+optional), which the registrar will see.
 
-The decision flow runs in [`backend/src/verify.js`](backend/src/verify.js):
+[`backend/src/document.js`](backend/src/document.js) reads the upload. It decodes the QR code on the verification page,
+falling back to the ID, hash and signature printed as text. That **locates** the registry record. Then
+[`backend/src/verify.js`](backend/src/verify.js) runs:
 
 ```
-ID found in registry?                 ──no──►  Not found
-Institution signature valid?          ──no──►  Invalid signature   (registry row edited without re-signing)
-QR hash = registered hash?            ──no──►  Tampered            (QR altered, or copied from another certificate)
-QR signature = registered signature?  ──no──►  Invalid signature   (forged QR)
-Revoked?                              ──yes─►  Revoked             (even with the genuine QR or PDF)
-File supplied & hash matches?         ──no──►  Tampered            (file edited or re-saved)
+QR / ID found in registry?            â”€â”€noâ”€â”€â–º  Not found           (QR to an unregistered ID = forged â†’ alert)
+Institution signature valid?          â”€â”€noâ”€â”€â–º  Invalid signature   (registry row edited without re-signing â†’ alert)
+QR hash = registered hash?            â”€â”€noâ”€â”€â–º  Tampered            (QR altered or copied â†’ alert)
+QR signature = registered signature?  â”€â”€noâ”€â”€â–º  Invalid signature   (forged QR â†’ alert)
+Revoked?                              â”€â”€yesâ”€â–º  Revoked             (revoked certificate presented â†’ alert)
+Every page = registered copy?         â”€â”€noâ”€â”€â–º  Tampered            (page edited / swapped / added / missing â†’ alert)
                                               Verified
 ```
 
-The QR step is skipped when the employer types the ID, and the file step is skipped when they don't upload one. A
-network error or timeout shows **Unable to verify**, which is never a verdict on the certificate itself.
+**Page comparison.** Each page is fingerprinted from what it actually draws: its decoded content streams plus the
+images and forms it uses. That fingerprint is compared with the registered verified PDF. A file that was only re-saved
+still passes, while any edit to a page fails. The result shows a page-by-page table ("Certificate (scan): Modified",
+"Verification page (QR): Matches").
+
+**Visual check.** A photo, or a printed-and-rescanned copy, can't be compared byte for byte. If its QR is genuine, the
+verdict is **Needs visual check**. A signed, 30-minute link then opens the **registered copy** for a side-by-side look.
+That link is only offered to someone who uploaded the document or scanned its QR.
+
+**Output area.** Every finding is listed in plain words. Malpractice is shown in red, together with a note that the
+registrar has been notified. A network error or timeout shows **Unable to verify**, which is never a verdict on the
+certificate itself.
+
+### Registrar: malpractice alerts (`/admin/alerts`)
+
+Every check that finds malpractice (tampered, forged or copied QR, unknown ID, revoked) creates an **alert**. Each alert
+records the findings, the certificate, and who presented the document (name, organisation, email, IP).
+
+Alerts show up in three places, all updating every 5 seconds: a red count badge on the **Alerts** menu item, a banner on
+the Dashboard and on the certificate's page, and the browser tab title. The registrar **acknowledges** each alert with
+an optional note, and that action is written to the audit log.
 
 ### Registrar: who verified (`/admin/verifications`, Dashboard, each certificate's page)
 
@@ -128,32 +136,36 @@ Every public check is stored with the verifier's name, organisation and email, p
 (QR scan / certificate ID / file), time and IP. The console polls every 5 seconds. New checks flash in the table, and
 the sidebar shows an unseen-count badge. Each certificate's page lists everyone who has verified it.
 
-## Demo script (≈3 minutes)
+## Demo script (â‰ˆ3 minutes)
 
-1. `npm run sample -- "Aarav Menon" 21CSE001`. Then sign in → **Upload certificate** → drop the sample scan, enter the same details → **Generate**.
+1. `npm run sample -- "Aarav Menon" 21CSE001`. Then sign in â†’ **Upload certificate** â†’ drop the sample scan, enter the same details â†’ **Generate**.
 2. **Download verified PDF** and open it: page 1 is the scan, page 2 is the QR verification page.
-3. Scan the QR with your phone (or click **Test verify** on the certificate page), then enter a name and organisation → **Verified**, with the QR checks passing.
+3. Scan the QR with your phone (or click **Test verify** on the certificate page), then enter a name and organisation â†’ **Verified**, with the QR checks passing.
 4. Switch back to the registrar console: the check appears in **Verifications** within 5 seconds.
-5. **Forged QR:** in the verify URL, change one character of `h=` → **Tampered**.
-6. **Edited file:** run `npm run tamper -- file DEG-CSE-2026-001` and upload `backend/data/DEG-CSE-2026-001-tampered.pdf` on the verify page → **Tampered**.
-7. **Revoked:** on the certificate page, choose *Revoke* → re-scan → **Revoked**.
-8. **Database edit:** run `npm run tamper -- record DEG-CSE-2026-001 studentName=Someone` → **Invalid signature**, with details hidden.
+5. **Forged QR:** in the verify URL, change one character of `h=` â†’ **Tampered**.
+6. **Forged certificate page:** run `npm run tamper -- file DEG-CSE-2026-001`. This overwrites page 1 and keeps the genuine QR page. Upload `backend/data/DEG-CSE-2026-001-tampered.pdf` on the home page â†’ **Tampered**, "Certificate page 1 has been modified". **Alerts** in the admin panel lights up red.
+7. **Revoked:** on the certificate page, choose *Revoke* â†’ re-scan â†’ **Revoked**.
+8. **Database edit:** run `npm run tamper -- record DEG-CSE-2026-001 studentName=Someone` â†’ **Invalid signature**, with details hidden.
 
 ## API
 
 | Method | Path | Auth | Purpose |
 | ------ | ---- | ---- | ------- |
-| GET  | `/api/institution` | — | Name, public key, fingerprint |
-| POST | `/api/verify` | — | Multipart: `certificateId`, `qrHash`, `qrSignature`, `file` (any combination) plus `verifierName`, `verifierOrganization`, `verifierEmail` |
-| GET  | `/api/records/:id` | — | Raw signed record, for independent checking |
-| POST | `/api/admin/login` | — | Returns a bearer token (8 h) |
-| POST | `/api/admin/certificates` | ✓ | Multipart: `file` + details → ID, hash, signature, QR |
-| GET  | `/api/admin/certificates[/:id]` | ✓ | List / detail (with QR and verification history) |
-| GET  | `/api/admin/certificates/:id/file[?version=original]` | ✓ | Verified PDF, or the original scan |
-| POST | `/api/admin/certificates/:id/revoke` | ✓ | Revoke with a reason |
-| GET  | `/api/admin/verifications[?after=&verdict=&q=]` | ✓ | Public verification feed |
-| GET  | `/api/admin/verifications/count?after=` | ✓ | Unseen count for the live badge |
-| GET  | `/api/admin/stats`, `/api/admin/audit` | ✓ | Dashboard numbers, registrar audit log |
+| GET  | `/api/institution` | â€” | Name, public key, fingerprint |
+| POST | `/api/verify` | â€” | Multipart: `certificateId`, `qrHash`, `qrSignature`, `file` (any combination) plus `verifierName`, `verifierOrganization`, `verifierEmail` |
+| GET  | `/api/records/:id` | â€” | Raw signed record, for independent checking |
+| POST | `/api/admin/login` | â€” | Returns a bearer token (8 h) |
+| POST | `/api/admin/certificates` | âœ“ | Multipart: `file` + details â†’ ID, hash, signature, QR |
+| GET  | `/api/admin/certificates[/:id]` | âœ“ | List / detail (with QR and verification history) |
+| GET  | `/api/admin/certificates/:id/file[?version=original]` | âœ“ | Verified PDF, or the original scan |
+| POST | `/api/admin/certificates/:id/revoke` | âœ“ | Revoke with a reason |
+| GET  | `/api/admin/verifications[?after=&verdict=&q=]` | âœ“ | Public verification feed |
+| GET  | `/api/admin/verifications/count?after=` | âœ“ | Unseen count for the live badge |
+| GET  | `/api/registered/:id?exp=&sig=` | signed link | Registered copy, for side-by-side comparison (link from a verification) |
+| GET  | `/api/admin/alerts[?status=open\|acknowledged\|all]` | âœ“ | Malpractice alerts |
+| GET  | `/api/admin/alerts/count` | âœ“ | Open alert count for the badge |
+| POST | `/api/admin/alerts/:id/ack` | âœ“ | Acknowledge with an optional note |
+| GET  | `/api/admin/stats`, `/api/admin/audit` | âœ“ | Dashboard numbers, registrar audit log |
 
 ## Security notes and what's next
 

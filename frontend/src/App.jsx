@@ -12,6 +12,7 @@ import Certificates from './pages/admin/Certificates.jsx';
 import CertificateDetail from './pages/admin/CertificateDetail.jsx';
 import Verifications from './pages/admin/Verifications.jsx';
 import Audit from './pages/admin/Audit.jsx';
+import Alerts from './pages/admin/Alerts.jsx';
 
 // The camera/QR library is large; only load it when someone opens the scanner.
 const Scan = lazy(() => import('./pages/Scan.jsx'));
@@ -58,6 +59,7 @@ export default function App() {
         <Route path="certificates" element={<Certificates />} />
         <Route path="certificates/:id" element={<CertificateDetail />} />
         <Route path="verifications" element={<Verifications />} />
+        <Route path="alerts" element={<Alerts />} />
         <Route path="audit" element={<Audit />} />
       </Route>
       <Route path="*" element={<NotFound />} />

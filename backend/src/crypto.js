@@ -41,13 +41,28 @@ export function loadOrCreateKeyFile(dataDir) {
   return crypto.createPrivateKey(fs.readFileSync(privPath));
 }
 
-// Institution signing key (Ed25519). The private key never leaves the server. In production it comes
-// from INSTITUTION_PRIVATE_KEY: it must stay the same forever, or every earlier signature stops verifying.
+// Institution signing key (Ed25519). The private key never leaves the server, and it must stay the same
+// forever, or every earlier signature stops verifying. Sources, in order:
+//   INSTITUTION_PRIVATE_KEY env var  >  key file in dataDir (local dev)  >  key generated once into the database (Vercel)
 export function loadKeys(cfg) {
   let privateKey;
   if (cfg.privateKey) privateKey = parsePrivateKey(cfg.privateKey);
-  else if (cfg.onVercel) throw new Error('INSTITUTION_PRIVATE_KEY is not set. Run `npm run key:export` locally and add it in Vercel.');
+  else if (cfg.onVercel) throw new Error('INSTITUTION_PRIVATE_KEY is not set and no database key is available.');
   else privateKey = loadOrCreateKeyFile(cfg.dataDir);
+  return keysFrom(privateKey);
+}
+
+export async function resolveKeys(cfg, db) {
+  if (cfg.privateKey || !cfg.onVercel) return loadKeys(cfg);
+  // Serverless has no disk: generate the key once and keep it in the database.
+  // OR IGNORE + re-read means concurrent cold starts all end up with the same key.
+  const pem = crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
+  await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('institution_private_key', ?)", pem);
+  const row = await db.get("SELECT value FROM settings WHERE key = 'institution_private_key'");
+  return keysFrom(parsePrivateKey(row.value));
+}
+
+function keysFrom(privateKey) {
   const publicKey = crypto.createPublicKey(privateKey);
   const publicKeyPem = publicKey.export({ type: 'spki', format: 'pem' });
   const digest = sha256(publicKey.export({ type: 'spki', format: 'der' }));

@@ -3,15 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { backendRoot, config } from './config.js';
 import { openDb, seed } from './db.js';
-import { loadKeys } from './crypto.js';
+import { resolveKeys } from './crypto.js';
 import { createAuth } from './auth.js';
 import { publicRouter } from './routes/public.js';
 import { adminRouter } from './routes/admin.js';
 
 export async function createApp(overrides = {}) {
   const cfg = { ...config, ...overrides };
-  const keys = loadKeys(cfg);
   const db = await openDb(cfg);
+  const keys = await resolveKeys(cfg, db);
   await seed(db, cfg);
   const auth = createAuth(db, cfg);
   const ctx = { db, keys, auth, cfg };

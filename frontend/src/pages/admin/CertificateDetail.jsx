@@ -170,6 +170,18 @@ export default function CertificateDetail() {
         </div>
       </div>
 
+      {data.alerts?.length > 0 && (
+        <div className="alert-banner" role="alert">
+          <span>
+            ⚠ {data.alerts.length} malpractice alert{data.alerts.length === 1 ? '' : 's'} for this certificate (
+            {data.alerts.filter((a) => !a.acknowledged_at).length} open). Latest: {data.alerts[0].title}
+          </span>
+          <Link className="btn danger sm" to="/admin/alerts">
+            Review alerts
+          </Link>
+        </div>
+      )}
+
       <div>
         <h2>
           Who verified this certificate <span className="live-dot" title="Live" />{' '}

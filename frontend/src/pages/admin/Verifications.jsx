@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { api, formatDate, markVerificationsSeen, timeAgo, useNewIds, usePolling } from '../../api.js';
 import { Badge, Empty, ErrorBox, Loading } from '../../components/ui.jsx';
 
-const VERDICT_OPTIONS = ['verified', 'tampered', 'invalid_signature', 'revoked', 'not_found'];
+const VERDICT_OPTIONS = ['verified', 'tampered', 'invalid_signature', 'revoked', 'review', 'not_found'];
 
 export function VerificationTable({ rows, showCert = true, fresh = new Set() }) {
   if (!rows.length) return <Empty>No verifications yet. They appear here as soon as someone checks a certificate.</Empty>;
@@ -48,6 +48,11 @@ export function VerificationTable({ rows, showCert = true, fresh = new Set() }) 
               )}
               <td>
                 <Badge value={v.verdict} verdict />
+                {v.malpractice ? (
+                  <div className="small" style={{ color: 'var(--bad)', fontWeight: 600, marginTop: 4 }}>
+                    ⚠ Malpractice
+                  </div>
+                ) : null}
               </td>
               <td className="small">{v.method}</td>
               <td className="small muted" title={v.user_agent || ''}>

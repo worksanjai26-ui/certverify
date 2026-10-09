@@ -6,6 +6,7 @@ import { Empty, ErrorBox, Loading } from '../../components/ui.jsx';
 const ACTIONS = {
   register: 'Certificate registered',
   revoke: 'Certificate revoked',
+  alert_ack: 'Alert acknowledged',
   login: 'Sign in',
   login_failed: 'Failed sign in',
 };

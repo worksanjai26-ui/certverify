@@ -71,6 +71,7 @@ export async function buildVerifiedPdf(original, type, record, qrText) {
   doc.setTitle(`Degree certificate ${record.certificateId}`);
   doc.setSubject('Scanned degree certificate with institution verification page');
   doc.setProducer('CertVerify');
+  doc.setKeywords(['CertVerify', record.certificateId]);
 
   const regular = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);

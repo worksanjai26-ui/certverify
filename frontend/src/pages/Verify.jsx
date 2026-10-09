@@ -80,8 +80,7 @@ export default function Verify() {
     );
   }
 
-  const method = qrHash ? 'QR code' : id ? 'certificate ID' : 'file';
-  const fileChecked = result?.steps?.some((s) => s.key === 'file' && (s.status === 'pass' || s.status === 'fail'));
+  const method = file ? 'document' : qrHash ? 'QR code' : 'certificate ID';
 
   return (
     <div className="stack">
@@ -108,12 +107,13 @@ export default function Verify() {
       {!loading && !error && result && (
         <>
           <VerdictView result={result} />
-          {['verified', 'tampered'].includes(result.verdict) && result.certificateId && (
+          {/* After an ID/QR check, offer the full document comparison. */}
+          {!file && ['verified', 'tampered', 'review'].includes(result.verdict) && result.certificateId && (
             <div className="card">
-              <div className="card-title">{fileChecked ? 'Check another file' : 'Optional: check the file you received'}</div>
+              <div className="card-title">Recommended: check the document itself</div>
               <p className="small muted">
-                Upload the certificate PDF the candidate sent you. Its SHA-256 hash is compared with the scan the
-                registrar registered; any edit, even re-saving, changes it.
+                The ID or QR only proves the record exists. Upload the certificate PDF the candidate gave you and every
+                page will be compared with the registered copy.
               </p>
               <FileDrop
                 onFile={(f) => {

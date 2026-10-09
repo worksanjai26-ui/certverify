@@ -28,13 +28,21 @@ const STATUS_TONES = {
   invalid_signature: 'bad',
   revoked_verdict: 'warn',
   tampered: 'bad',
+  review: 'warn',
   unable: 'muted',
+  high: 'bad',
+  medium: 'warn',
+  open: 'bad',
+  acknowledged: 'muted',
 };
 
 const LABELS = {
   in_progress: 'In progress',
   not_found: 'Not found',
   invalid_signature: 'Invalid signature',
+  review: 'Needs visual check',
+  high: 'High',
+  medium: 'Medium',
 };
 
 export function Badge({ value, verdict = false }) {

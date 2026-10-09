@@ -23,68 +23,68 @@ export default function Home() {
       <section className="hero">
         <div>
           <div className="eyebrow">Employer verification</div>
-          <h1>Check a degree certificate against the college's signed record.</h1>
+          <h1>Upload the certificate you were given. We'll check every page.</h1>
           <p className="lead">
-            Every certificate registered by the college has a verification page at the end with a QR code. Scan it, or
-            type the certificate ID, and we cross-check its hash and digital signature with the official registry.
+            We read the QR code on the certificate's verification page, find the institution's signed record, and
+            compare your document with the registered copy page by page. Any alteration, swapped page or fake QR is
+            reported here, and the college is notified.
           </p>
-          <div className="row">
-            <Link className="btn primary" to="/scan">
-              Scan QR code
+        </div>
+
+        <div className="card stack">
+          <div>
+            <div className="card-title">1 · Upload the certificate</div>
+            <FileDrop
+              onFile={(file) => navigate('/verify', { state: { file } })}
+              accept="application/pdf,.pdf,image/png,image/jpeg"
+              title="Drop the certificate PDF here, or click to choose"
+              hint="The PDF you received (both pages), or a photo of its QR page. Files are checked, never stored."
+            />
+          </div>
+          <div>
+            <div className="card-title">Or check by ID / QR only</div>
+            <form onSubmit={submit} className="stack" style={{ gap: 10 }}>
+              <div className="search-bar">
+                <input
+                  aria-label="Certificate ID"
+                  placeholder="e.g. DEG-CSE-2026-001"
+                  value={id}
+                  onChange={(e) => {
+                    setId(e.target.value);
+                    setIdError('');
+                  }}
+                />
+                <button className="btn">Verify</button>
+              </div>
+              {idError && <div className="small" style={{ color: 'var(--bad)' }}>{idError}</div>}
+            </form>
+            <Link className="btn ghost block" to="/scan" style={{ marginTop: 10 }}>
+              Scan the QR code with your camera
             </Link>
           </div>
         </div>
-
-        <div className="card">
-          <div className="card-title">Verify by certificate ID</div>
-          <form onSubmit={submit} className="stack" style={{ gap: 10 }}>
-            <div className="search-bar">
-              <input
-                aria-label="Certificate ID"
-                placeholder="e.g. DEG-CSE-2026-001"
-                value={id}
-                onChange={(e) => {
-                  setId(e.target.value);
-                  setIdError('');
-                }}
-              />
-              <button className="btn">Verify</button>
-            </div>
-            {idError && <div className="small" style={{ color: 'var(--bad)' }}>{idError}</div>}
-          </form>
-          <div className="card-title" style={{ marginTop: 22 }}>
-            Or verify the PDF itself
-          </div>
-          <FileDrop
-            onFile={(file) => navigate('/verify', { state: { file } })}
-            accept="application/pdf,.pdf,image/png,image/jpeg"
-            title="Drop the certificate PDF here"
-            hint="Its SHA-256 fingerprint is matched against the registry. The file is hashed, never stored."
-          />
-        </div>
       </section>
 
-      <div className="eyebrow">How it works</div>
+      <div className="eyebrow">What we check</div>
       <div className="flow">
         <div className="card">
-          <h3>Registrar uploads the scan</h3>
+          <h3>Locate</h3>
           <p className="muted small">
-            The college uploads the scanned degree certificate. It gets a unique certificate ID and a SHA-256 hash, and
-            is signed with the institution's private key.
+            The QR code on the verification page points to the certificate's record in the college's registry.
           </p>
         </div>
         <div className="card">
-          <h3>QR page is attached</h3>
+          <h3>Authenticate</h3>
           <p className="muted small">
-            The ID, hash and signature are encoded in a QR code on a page added after the scan. The signed record is
-            stored in the official registry.
+            The record's digital signature must be the institution's, and the QR's hash and signature must match it
+            exactly.
           </p>
         </div>
         <div className="card">
-          <h3>You cross-verify</h3>
+          <h3>Compare</h3>
           <p className="muted small">
-            We check the ID exists, the signature is valid, the QR's hash and signature match the registry, and it
-            hasn't been revoked. The registrar is told who verified.
+            Every page of your document is compared with the registered copy. Edited, swapped, added or missing pages
+            are reported as malpractice.
           </p>
         </div>
       </div>

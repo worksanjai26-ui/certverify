@@ -8,8 +8,9 @@ import path from 'node:path';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
 import QRCode from 'qrcode';
 import { createApp } from '../src/app.js';
-import { canonicalize, loadKeys, privateKeyPath, sha256 } from '../src/crypto.js';
+import { canonicalize, loadKeys, privateKeyPath, resolveKeys, sha256 } from '../src/crypto.js';
 import { openDb } from '../src/db.js';
+import { buildVerifiedPdf } from '../src/stamp.js';
 
 let ctx, server, base, token;
 const VERIFIER = { verifierName: 'Priya Shah', verifierOrganization: 'Acme Hiring Ltd', verifierEmail: 'priya@acme.test' };
@@ -174,16 +175,21 @@ describe('public verification', () => {
     assert.equal(res.data.verdict, 'tampered');
   });
 
-  test('uploading the verified PDF or the original scan gives Verified; an edited one is Tampered', async () => {
+  test('uploading the verified PDF or the original scan gives Verified', async () => {
     const scan = await scannedPdf('J');
     const r = await register(scan);
     assert.equal((await verify({ certificateId: r.certificate.id }, r.pdf)).data.verdict, 'verified');
     assert.equal((await verify({ certificateId: r.certificate.id }, scan)).data.verdict, 'verified');
     assert.equal((await verify({}, r.pdf)).data.certificateId, r.certificate.id, 'file alone finds the certificate');
+  });
 
-    const edited = Buffer.concat([r.pdf, Buffer.from('\n% edited\n')]);
-    assert.equal((await verify({ certificateId: r.certificate.id }, edited)).data.verdict, 'tampered');
-    assert.equal((await verify({}, edited)).data.verdict, 'not_found');
+  test('bytes appended without changing any page count as re-saved, not tampered', async () => {
+    const r = await register(await scannedPdf('J2'));
+    const resaved = Buffer.concat([r.pdf, Buffer.from('\n% edited\n')]);
+    const res = (await verify({}, resaved)).data;
+    assert.equal(res.verdict, 'verified');
+    assert.ok(res.findings.some((f) => f.code === 'resaved'));
+    assert.equal(res.malpractice, false);
   });
 
   test('unknown ID shows Not found', async () => {
@@ -216,7 +222,166 @@ describe('public verification', () => {
   });
 });
 
+// ---- Document comparison: the employer uploads what they were given ----
+async function editPage(pdf, index, text = 'FORGED CGPA 9.99') {
+  const d = await PDFDocument.load(pdf);
+  d.getPage(index).drawText(text, { x: 60, y: 60, size: 18, font: await d.embedFont(StandardFonts.Helvetica) });
+  return Buffer.from(await d.save());
+}
+
+async function combine(...picks) {
+  const out = await PDFDocument.create();
+  for (const [pdf, index] of picks) {
+    const [page] = await out.copyPages(await PDFDocument.load(pdf), [index]);
+    out.addPage(page);
+  }
+  return Buffer.from(await out.save());
+}
+
+const openAlerts = async () => (await call('GET', '/admin/alerts?status=open')).data.alerts;
+
+describe('document verification and malpractice', () => {
+  test('the QR on the last page locates the certificate and every page is compared', async () => {
+    const r = await register(await scannedPdf('M'));
+    const res = (await verify({}, r.pdf)).data;
+    assert.equal(res.verdict, 'verified');
+    assert.equal(res.document.locator.source, 'qr');
+    assert.equal(res.document.locator.page, 2);
+    assert.equal(res.steps.find((s) => s.key === 'qr').status, 'pass');
+    assert.equal(res.malpractice, false);
+  });
+
+  test('a re-saved copy with identical pages is compared page by page and passes', async () => {
+    const r = await register(await scannedPdf('N'));
+    const resaved = Buffer.from(await (await PDFDocument.load(r.pdf)).save());
+    assert.notEqual(sha256(resaved), sha256(r.pdf));
+    const res = (await verify({}, resaved)).data;
+    assert.equal(res.verdict, 'verified');
+    assert.deepEqual(res.document.comparison.rows.map((x) => x.status), ['match', 'match']);
+  });
+
+  test('an edited certificate page is tampered, named in the output, and alerts the admin', async () => {
+    const r = await register(await scannedPdf('O'));
+    const before = (await openAlerts()).length;
+    const res = (await verify({ verifierName: 'Eve Mallory', verifierOrganization: 'Shady Corp' }, await editPage(r.pdf, 0))).data;
+    assert.equal(res.verdict, 'tampered');
+    assert.equal(res.malpractice, true);
+    assert.equal(res.certificateId, r.certificate.id);
+    assert.deepEqual(res.document.comparison.rows.map((x) => x.status), ['altered', 'match']);
+    assert.ok(res.findings.some((f) => f.code === 'page-altered' && /Certificate page 1/.test(f.message)));
+    assert.ok(res.alertId);
+
+    const alerts = await openAlerts();
+    assert.equal(alerts.length, before + 1);
+    assert.equal(alerts[0].cert_id, r.certificate.id);
+    assert.equal(alerts[0].verifier_name, 'Eve Mallory');
+    assert.equal(alerts[0].severity, 'high');
+    assert.ok(alerts[0].findings.length >= 1);
+  });
+
+  test('an edited verification (QR) page is tampered', async () => {
+    const r = await register(await scannedPdf('P'));
+    const res = (await verify({}, await editPage(r.pdf, 1, 'Approved'))).data;
+    assert.equal(res.verdict, 'tampered');
+    assert.deepEqual(res.document.comparison.rows.map((x) => x.status), ['match', 'altered']);
+  });
+
+  test("a genuine QR page stapled to someone else's certificate is caught", async () => {
+    const a = await register(await scannedPdf('Q1'));
+    const b = await register(await scannedPdf('Q2'));
+    const res = (await verify({}, await combine([a.pdf, 0], [b.pdf, 1]))).data;
+    assert.equal(res.certificateId, b.certificate.id, 'the QR leads to B');
+    assert.equal(res.verdict, 'tampered', "but page 1 is A's certificate");
+    assert.equal(res.document.comparison.rows[0].status, 'altered');
+  });
+
+  test('an added or removed page is caught', async () => {
+    const r = await register(await scannedPdf('R'));
+    const extra = await combine([r.pdf, 0], [r.pdf, 1], [r.pdf, 0]);
+    const added = (await verify({}, extra)).data;
+    assert.equal(added.verdict, 'tampered');
+    assert.ok(added.findings.some((f) => f.code === 'page-extra'));
+
+    const onlyQrPage = await combine([r.pdf, 1]);
+    const removed = (await verify({ certificateId: r.certificate.id }, onlyQrPage)).data;
+    assert.equal(removed.verdict, 'tampered');
+  });
+
+  test('a fake certificate whose QR points to an unregistered ID is flagged as forged', async () => {
+    const fakeId = 'DEG-CSE-2026-777';
+    const fake = await buildVerifiedPdf(
+      await scannedPdf('fake'),
+      'application/pdf',
+      {
+        certificateId: fakeId,
+        institution: 'Demo Institute of Technology',
+        studentName: 'Faker',
+        rollNo: 'X1',
+        program: 'B.Tech',
+        department: 'CSE',
+        graduationYear: 2026,
+        issuedAt: new Date().toISOString(),
+        documentHash: sha256('x'),
+        signature: 'A'.repeat(86),
+        keyId: 'deadbeef',
+        portalUrl: 'http://portal.test',
+      },
+      `http://portal.test/verify/${fakeId}?h=${sha256('x')}&s=${'A'.repeat(86)}`,
+    );
+    const res = (await verify({}, fake)).data;
+    assert.equal(res.verdict, 'not_found');
+    assert.equal(res.malpractice, true);
+    assert.ok(res.findings.some((f) => f.code === 'unknown-id'));
+    assert.ok((await openAlerts()).some((a) => a.findings.some((f) => f.code === 'unknown-id')));
+  });
+
+  test('a photo of the QR is checked but sent for visual review, with the registered copy', async () => {
+    const r = await register(await scannedPdf('S'));
+    const photo = await QRCode.toBuffer(r.qrText, { width: 600 });
+    const res = (await verify({}, photo)).data;
+    assert.equal(res.verdict, 'review');
+    assert.equal(res.steps.find((s) => s.key === 'qr').status, 'pass');
+    assert.ok(res.registeredCopyUrl);
+
+    const copy = await fetch(base.replace(/\/api$/, '') + res.registeredCopyUrl);
+    assert.equal(copy.status, 200);
+    assert.equal(sha256(Buffer.from(await copy.arrayBuffer())), sha256(r.pdf));
+    const forgedLink = await fetch(base.replace(/\/api$/, '') + res.registeredCopyUrl.replace(/sig=.*/, 'sig=nope'));
+    assert.equal(forgedLink.status, 403);
+  });
+
+  test('a typed ID alone never reveals the registered copy', async () => {
+    const res = (await verify({ certificateId: 'DEG-CSE-2026-001' })).data;
+    assert.equal(res.registeredCopyUrl, undefined);
+  });
+
+  test('presenting a revoked certificate raises an alert', async () => {
+    const r = await register(await scannedPdf('T'));
+    await call('POST', `/admin/certificates/${r.certificate.id}/revoke`, { body: { reason: 'Degree withdrawn' } });
+    const res = (await verify({}, r.pdf)).data;
+    assert.equal(res.verdict, 'revoked');
+    assert.equal(res.malpractice, true);
+    assert.ok((await openAlerts()).some((a) => a.cert_id === r.certificate.id && a.severity === 'medium'));
+  });
+
+  test('the registrar can acknowledge an alert', async () => {
+    const [first] = await openAlerts();
+    const before = (await call('GET', '/admin/alerts/count')).data.open;
+    const ack = await call('POST', `/admin/alerts/${first.id}/ack`, { body: { note: 'Called the employer' } });
+    assert.equal(ack.status, 200);
+    assert.equal((await call('GET', '/admin/alerts/count')).data.open, before - 1);
+    assert.equal((await call('POST', `/admin/alerts/${first.id}/ack`, { body: {} })).status, 404);
+    assert.equal((await call('GET', '/admin/alerts', { auth: false })).status, 401);
+  });
+});
+
 describe('deployment configuration', () => {
+  test('on Vercel without INSTITUTION_PRIVATE_KEY, one key is generated into the database and reused', async () => {
+    const a = await resolveKeys({ onVercel: true }, ctx.db);
+    const b = await resolveKeys({ onVercel: true }, ctx.db);
+    assert.equal(a.keyId, b.keyId);
+  });
+
   test('the signing key can come from INSTITUTION_PRIVATE_KEY as PEM or base64', async () => {
     const pem = fs.readFileSync(privateKeyPath(ctx.cfg.dataDir), 'utf8');
     for (const value of [pem, pem.replace(/\n/g, '\\n'), Buffer.from(pem).toString('base64')]) {

@@ -83,12 +83,43 @@ function useUnseenVerifications() {
   return count;
 }
 
+// Open malpractice alerts; also shown in the tab title so it's noticed from other tabs.
+export function useOpenAlerts() {
+  const [counts, setCounts] = useState({ open: 0, openHigh: 0 });
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const bump = () => setTick((t) => t + 1);
+    window.addEventListener('certverify:alerts', bump);
+    return () => window.removeEventListener('certverify:alerts', bump);
+  }, []);
+  usePolling(
+    async () => {
+      try {
+        setCounts(await api('/admin/alerts/count'));
+      } catch {
+        /* transient; next poll retries */
+      }
+    },
+    5000,
+    [tick],
+  );
+  useEffect(() => {
+    document.title = counts.open ? `(${counts.open}) ⚠ CertVerify` : 'CertVerify';
+    return () => {
+      document.title = 'CertVerify';
+    };
+  }, [counts.open]);
+  return counts;
+}
+
 export function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const unseen = useUnseenVerifications();
+  const alerts = useOpenAlerts();
   const links = [
     ['/admin', 'Dashboard', true],
+    ['/admin/alerts', 'Alerts', false, alerts.open, 'danger'],
     ['/admin/upload', 'Upload certificate'],
     ['/admin/certificates', 'Certificates'],
     ['/admin/verifications', 'Verifications', false, unseen],
@@ -101,10 +132,10 @@ export function AdminLayout() {
           <Brand institution="Registrar console" />
           <ThemeToggle />
         </div>
-        {links.map(([to, label, end, badge]) => (
+        {links.map(([to, label, end, badge, kind]) => (
           <NavLink key={to} to={to} end={end} className="side-link">
             {label}
-            {badge > 0 && <span className="nav-badge">{badge > 99 ? '99+' : badge}</span>}
+            {badge > 0 && <span className={`nav-badge ${kind ?? ''}`}>{badge > 99 ? '99+' : badge}</span>}
           </NavLink>
         ))}
         <a className="side-link" href="/" target="_blank" rel="noreferrer">

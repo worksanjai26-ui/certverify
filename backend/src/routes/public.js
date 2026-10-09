@@ -1,8 +1,10 @@
+import crypto from 'node:crypto';
 import express from 'express';
 import multer from 'multer';
 import { normalizeId, verifyCertificate } from '../verify.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const VIEW_TTL_MS = 30 * 60 * 1000;
 
 const text = (v, max) => {
   const s = String(v ?? '').trim().replace(/\s+/g, ' ');
@@ -22,6 +24,13 @@ function parseVerifier(b) {
 
 export function publicRouter({ db, keys, cfg }) {
   const router = express.Router();
+  // Short-lived signed links to the registered copy, keyed off the institution key.
+  const viewSecret = crypto
+    .createHash('sha256')
+    .update(keys.privateKey.export({ type: 'pkcs8', format: 'der' }))
+    .update('registered-copy-v1')
+    .digest();
+  const viewToken = (id, exp) => crypto.createHmac('sha256', viewSecret).update(`${id}.${exp}`).digest('base64url');
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: Math.floor(cfg.maxUploadMb * 1024 * 1024), files: 1 } });
 
   router.get('/health', (req, res) => res.json({ ok: true }));
@@ -53,13 +62,16 @@ export function publicRouter({ db, keys, cfg }) {
     }
 
     const result = await verifyCertificate(db, keys, { certificateId, qrHash, qrSignature, file: req.file?.buffer });
-    const method = [qrHash || qrSignature ? 'QR scan' : certificateId ? 'Certificate ID' : null, req.file ? 'file' : null]
-      .filter(Boolean)
-      .join(' + ');
+    const method =
+      [qrHash || qrSignature ? 'QR scan' : certificateId ? 'Certificate ID' : null, req.file ? 'document upload' : null]
+        .filter(Boolean)
+        .join(' + ') +
+      (!certificateId && result.document?.locator?.source === 'qr' ? ' (QR read from file)' : '');
 
-    await db.run(
-      `INSERT INTO verifications (at, cert_id, verdict, method, verifier_name, verifier_org, verifier_email, ip, user_agent)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    const notable = result.findings.filter((f) => f.severity !== 'info');
+    const v = await db.run(
+      `INSERT INTO verifications (at, cert_id, verdict, method, verifier_name, verifier_org, verifier_email, ip, user_agent, malpractice, findings)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       result.checkedAt,
       result.certificateId,
       result.verdict,
@@ -69,8 +81,55 @@ export function publicRouter({ db, keys, cfg }) {
       verifier.email,
       req.ip,
       String(req.get('user-agent') ?? '').slice(0, 300) || null,
+      result.malpractice ? 1 : 0,
+      result.findings.length ? JSON.stringify(result.findings) : null,
     );
+
+    // Malpractice reaches the registrar as an alert in the admin panel.
+    if (result.malpractice) {
+      const severity = notable.some((f) => f.severity === 'high') ? 'high' : 'medium';
+      const alert = await db.run(
+        `INSERT INTO alerts (at, verification_id, cert_id, verdict, severity, title, findings, verifier_name, verifier_org, verifier_email, ip)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        result.checkedAt,
+        Number(v.lastInsertRowid),
+        result.certificateId,
+        result.verdict,
+        severity,
+        notable[0].message.slice(0, 300),
+        JSON.stringify(notable),
+        verifier.name,
+        verifier.org,
+        verifier.email,
+        req.ip,
+      );
+      result.alertId = Number(alert.lastInsertRowid);
+    }
+
+    // Someone holding the document (file or its QR) may open the registered copy to compare visually.
+    if (result.certificate && (req.file || qrHash)) {
+      const exp = Date.now() + VIEW_TTL_MS;
+      result.registeredCopyUrl = `/api/registered/${result.certificateId}?exp=${exp}&sig=${viewToken(result.certificateId, exp)}`;
+    }
     res.json(result);
+  });
+
+  router.get('/registered/:id', async (req, res) => {
+    const id = normalizeId(req.params.id);
+    const exp = Number(req.query.exp);
+    const sig = String(req.query.sig ?? '');
+    const expected = viewToken(id, exp);
+    const valid =
+      exp > Date.now() &&
+      sig.length === expected.length &&
+      crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+    if (!valid) return res.status(403).json({ error: 'This link has expired. Verify the document again to get a new one.' });
+    const row = await db.get('SELECT stamped FROM certificates WHERE id = ?', id);
+    if (!row) return res.status(404).json({ error: 'Certificate not found.' });
+    res.set('Content-Type', 'application/pdf');
+    res.set('Content-Disposition', `inline; filename="${id}-registered.pdf"`);
+    res.set('Cache-Control', 'private, no-store');
+    res.send(Buffer.from(row.stamped));
   });
 
   // Raw signed record, for independent verification with the public key.
