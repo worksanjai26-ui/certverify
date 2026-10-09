@@ -1,6 +1,5 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import { hashPassword } from './crypto.js';
 
 const SCHEMA = `
@@ -89,34 +88,51 @@ CREATE INDEX IF NOT EXISTS audit_cert ON audit_events(cert_id);
 `;
 
 const toObjects = (rs) => rs.rows.map((row) => Object.fromEntries(rs.columns.map((c, i) => [c, row[i]])));
+const nullify = (args) => args.map((a) => a ?? null);
 
-// Thin async wrapper so the rest of the code reads `await db.get(sql, ...args)`.
-function wrap(client) {
-  const exec = (sql, args) => client.execute({ sql, args: args.map((a) => a ?? null) });
+// Both backends expose the same small async API: `await db.get(sql, ...args)`, all, run, exec, close.
+
+// Turso / libSQL over HTTP (pure fetch, so serverless bundles need no native binaries).
+async function openTurso(cfg) {
+  const { createClient } = await import('@libsql/client/web');
+  const client = createClient({ url: cfg.databaseUrl, authToken: cfg.databaseAuthToken ?? undefined });
+  const execute = (sql, args) => client.execute({ sql, args: nullify(args) });
   return {
-    get: async (sql, ...args) => toObjects(await exec(sql, args))[0],
-    all: async (sql, ...args) => toObjects(await exec(sql, args)),
-    run: (sql, ...args) => exec(sql, args),
+    get: async (sql, ...args) => toObjects(await execute(sql, args))[0],
+    all: async (sql, ...args) => toObjects(await execute(sql, args)),
+    run: async (sql, ...args) => {
+      const r = await execute(sql, args);
+      return { rowsAffected: r.rowsAffected, lastInsertRowid: r.lastInsertRowid };
+    },
+    exec: (sql) => client.executeMultiple(sql),
     close: () => client.close(),
   };
 }
 
-// Turso in production (TURSO_DATABASE_URL); a local SQLite file otherwise. Same SQL either way.
+// A SQLite file on local disk, via Node's built-in driver: backend/data locally,
+// the instance's temporary directory on Vercel when no Turso database is configured.
+async function openFile(cfg) {
+  const { DatabaseSync } = await import('node:sqlite');
+  fs.mkdirSync(cfg.dataDir, { recursive: true });
+  const sqlite = new DatabaseSync(path.join(cfg.dataDir, 'certverify.db'));
+  sqlite.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;');
+  return {
+    get: async (sql, ...args) => sqlite.prepare(sql).get(...nullify(args)),
+    all: async (sql, ...args) => sqlite.prepare(sql).all(...nullify(args)),
+    run: async (sql, ...args) => {
+      const r = sqlite.prepare(sql).run(...nullify(args));
+      return { rowsAffected: r.changes, lastInsertRowid: r.lastInsertRowid };
+    },
+    exec: async (sql) => sqlite.exec(sql),
+    close: () => sqlite.close(),
+  };
+}
+
 export async function openDb(cfg) {
-  let url = cfg.databaseUrl;
-  if (!url) {
-    if (cfg.onVercel) throw new Error('TURSO_DATABASE_URL is not set. Vercel has no persistent disk for a local database.');
-    fs.mkdirSync(cfg.dataDir, { recursive: true });
-    url = pathToFileURL(path.join(cfg.dataDir, 'certverify.db')).href;
-  }
-  const local = url.startsWith('file:');
-  // The web client is pure fetch, so serverless bundles need no native binaries.
-  const { createClient } = await import(local ? '@libsql/client' : '@libsql/client/web');
-  const client = createClient({ url, authToken: cfg.databaseAuthToken ?? undefined });
-  if (local) await client.execute('PRAGMA journal_mode = WAL');
-  await client.executeMultiple(SCHEMA);
-  await migrate(client);
-  return wrap(client);
+  const db = cfg.databaseUrl ? await openTurso(cfg) : await openFile(cfg);
+  await db.exec(SCHEMA);
+  await migrate(db);
+  return db;
 }
 
 // Columns added after the first release; existing databases get them on startup.
@@ -125,12 +141,12 @@ const ADDED_COLUMNS = [
   ['verifications', 'findings', 'TEXT'],
 ];
 
-async function migrate(client) {
+async function migrate(db) {
   for (const [table, column, type] of ADDED_COLUMNS) {
-    const cols = await client.execute(`PRAGMA table_info(${table})`);
-    if (!cols.rows.some((r) => r[1] === column)) {
+    const cols = await db.all(`PRAGMA table_info(${table})`);
+    if (!cols.some((c) => c.name === column)) {
       try {
-        await client.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+        await db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
       } catch (e) {
         if (!/duplicate column/i.test(e.message)) throw e; // another instance got there first
       }

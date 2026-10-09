@@ -1,3 +1,4 @@
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -5,14 +6,18 @@ export const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.u
 
 const onVercel = Boolean(process.env.VERCEL);
 const vercelUrl = process.env.VERCEL_PROJECT_PRODUCTION_URL && `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+const databaseUrl = process.env.TURSO_DATABASE_URL || null;
+// On Vercel without Turso, data lives on the instance's temporary disk and can vanish at any time.
+const ephemeral = onVercel && !databaseUrl && !process.env.DATA_DIR;
 
 export const config = {
   onVercel,
+  ephemeral,
   port: Number(process.env.PORT || 4000),
-  // Local development keeps the database and signing key here. Not used when the env vars below are set.
-  dataDir: process.env.DATA_DIR || path.join(backendRoot, 'data'),
-  // Turso / libSQL. Unset = local SQLite file in dataDir.
-  databaseUrl: process.env.TURSO_DATABASE_URL || null,
+  // SQLite file (and, locally, the signing key). Not used when TURSO_DATABASE_URL is set.
+  dataDir: process.env.DATA_DIR || (ephemeral ? path.join(os.tmpdir(), 'certverify') : path.join(backendRoot, 'data')),
+  // Turso / libSQL. Unset = SQLite file in dataDir.
+  databaseUrl,
   databaseAuthToken: process.env.TURSO_AUTH_TOKEN || null,
   // Ed25519 private key (PEM, or base64 of the PEM). Unset = key file in dataDir.
   privateKey: process.env.INSTITUTION_PRIVATE_KEY || null,

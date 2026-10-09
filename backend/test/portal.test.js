@@ -390,9 +390,14 @@ describe('deployment configuration', () => {
     }
   });
 
-  test('on Vercel, missing key or database settings fail loudly instead of using temporary storage', async () => {
+  test('without Turso, a fresh SQLite file plus a database-held key works (Vercel temporary storage)', async () => {
     assert.throws(() => loadKeys({ onVercel: true }), /INSTITUTION_PRIVATE_KEY/);
-    await assert.rejects(openDb({ onVercel: true }), /TURSO_DATABASE_URL/);
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'certverify-ephemeral-'));
+    const db = await openDb({ dataDir: dir });
+    const keys = await resolveKeys({ onVercel: true }, db);
+    assert.equal((await resolveKeys({ onVercel: true }, db)).keyId, keys.keyId);
+    db.close();
+    assert.equal((await call('GET', '/institution', { auth: false })).data.storage, 'persistent');
   });
 
   test('uploads over the size limit get a clear 413', async () => {

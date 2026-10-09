@@ -45,6 +45,7 @@ export function publicRouter({ db, keys, cfg }) {
       fingerprint: keys.fingerprint,
       publicKeyPem: keys.publicKeyPem,
       maxUploadMb: cfg.maxUploadMb,
+      storage: cfg.ephemeral ? 'temporary' : 'persistent',
     }),
   );
 

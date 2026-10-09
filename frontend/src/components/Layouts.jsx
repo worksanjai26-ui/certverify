@@ -28,10 +28,21 @@ export function useInstitution() {
   return info;
 }
 
+// Shown when the server runs without a permanent database (Vercel without Turso).
+function DemoStorageBanner({ info }) {
+  if (info?.storage !== 'temporary') return null;
+  return (
+    <div className="demo-banner" role="note">
+      Demo mode: temporary storage. Uploaded certificates and logs can be reset at any time.
+    </div>
+  );
+}
+
 export function PublicLayout() {
   const info = useInstitution();
   return (
     <>
+      <DemoStorageBanner info={info} />
       <header className="topbar">
         <div className="topbar-inner">
           <Brand institution={info?.name} />
@@ -117,6 +128,7 @@ export function AdminLayout() {
   const navigate = useNavigate();
   const unseen = useUnseenVerifications();
   const alerts = useOpenAlerts();
+  const info = useInstitution();
   const links = [
     ['/admin', 'Dashboard', true],
     ['/admin/alerts', 'Alerts', false, alerts.open, 'danger'],
@@ -158,6 +170,7 @@ export function AdminLayout() {
         </button>
       </aside>
       <div className="admin-main">
+        <DemoStorageBanner info={info} />
         <Outlet />
       </div>
     </div>
