@@ -52,14 +52,12 @@ export function loadKeys(cfg) {
   return keysFrom(privateKey);
 }
 
-export async function resolveKeys(cfg, db) {
+export async function resolveKeys(cfg, store) {
   if (cfg.privateKey || !cfg.onVercel) return loadKeys(cfg);
-  // Serverless has no disk: generate the key once and keep it in the database.
-  // OR IGNORE + re-read means concurrent cold starts all end up with the same key.
+  // Serverless has no disk: generate the key once and keep it in the database. The store only keeps
+  // the first value written, so concurrent cold starts all end up with the same key.
   const pem = crypto.generateKeyPairSync('ed25519').privateKey.export({ type: 'pkcs8', format: 'pem' });
-  await db.run("INSERT OR IGNORE INTO settings (key, value) VALUES ('institution_private_key', ?)", pem);
-  const row = await db.get("SELECT value FROM settings WHERE key = 'institution_private_key'");
-  return keysFrom(parsePrivateKey(row.value));
+  return keysFrom(parsePrivateKey(await store.getOrInitSetting('institution_private_key', pem)));
 }
 
 function keysFrom(privateKey) {

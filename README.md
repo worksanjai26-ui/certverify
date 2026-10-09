@@ -1,4 +1,4 @@
-﻿# CertVerify: Digital Degree Certificate Verification
+# CertVerify: Digital Degree Certificate Verification
 
 The college registrar **uploads the scanned copy of a degree certificate**. The portal then does the following:
 
@@ -14,7 +14,7 @@ the database, and **every verification, with who did it, shows up live on the re
 | -------- | ----- |
 | Frontend | React 18 + Vite, React Router, `html5-qrcode` (camera and photo scanning), light/dark themes |
 | Backend  | Node.js 22 / Express 5, built-in `node:crypto` (Ed25519, SHA-256, scrypt) |
-| Database | [Turso](https://turso.tech) (hosted SQLite) in production; a local SQLite file in development (same client and SQL) |
+| Storage  | **Firebase Cloud Firestore** in production (scans stored in <1 MB chunks, so the free Spark plan is enough); a local SQLite file in development. Turso also supported |
 | PDF / QR | `pdf-lib` (appends the verification page to the scan), `qrcode` |
 | Hosting  | Vercel: static React build + one serverless function for `/api` |
 
@@ -41,7 +41,9 @@ on `/scan`, works anywhere.
 npm test
 ```
 
-33 end-to-end tests run against a real server and a throwaway database.
+71 end-to-end tests run against a real server. The full suite runs twice: once on SQLite, and once on an in-memory
+Firestore stand-in (`backend/test/fake-firestore.js`) that enforces Firestore's rules: the 1 MiB document limit,
+reads before writes in transactions, and no composite indexes needed.
 
 ## Deploy to Vercel
 
@@ -49,16 +51,27 @@ Vercel has no permanent disk, so production storage lives elsewhere:
 
 | What | Where in production | Env var |
 | ---- | ------------------- | ------- |
-| Database (certificates, scans, verifications, alerts, sessions) | Turso | `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN` (**required**) |
-| Institution signing key | generated once on first start and kept in the database; or your own | `INSTITUTION_PRIVATE_KEY` (optional) |
+| Everything: certificates, scans, verifications, alerts, sessions | Firebase Cloud Firestore | `FIREBASE_SERVICE_ACCOUNT` (**required**) |
+| Institution signing key | generated once on first start and kept in Firestore; or your own | `INSTITUTION_PRIVATE_KEY` (optional) |
 | Registrar login (created on first request) | defaults to the seed login in `backend/.env.example` | `ADMIN_EMAIL`, `ADMIN_PASSWORD` (optional) |
 
-**1. Create the Turso database.** In the project folder, run `npx vercel integration add tursocloud`, or go to
-Vercel â†’ *Storage* â†’ *Create* â†’ **Turso**. Either way, the database is created and `TURSO_DATABASE_URL` and
-`TURSO_AUTH_TOKEN` are added to the project.
+**1. Create the Firebase project and database** (free Spark plan):
+1. At https://console.firebase.google.com, click **Create a project**, e.g. `certverify`. Google Analytics isn't needed.
+2. Go to **Build → Firestore Database → Create database**. Choose **Production mode** and a location near your users (e.g. `asia-south1`, Mumbai).
+3. Go to **⚙ Project settings → Service accounts → Generate new private key**. This downloads a JSON file. Treat it like a password.
 
-**2. Deploy.** Run `npx vercel deploy --prod`, or import the GitHub repo into Vercel. Then open
-`https://<project>.vercel.app/admin`, sign in, and upload a certificate.
+**2. Give Vercel the key.** In *Vercel → Project → Settings → Environment Variables*, add `FIREBASE_SERVICE_ACCOUNT`. Its value is the **entire contents** of that JSON file (or base64 of it). Choose *Production* and mark it *Sensitive*.
+
+**3. Deploy.** Run `npx vercel deploy --prod`. Then open `https://<project>.vercel.app/admin`, sign in, and upload a
+certificate. `/api/institution` reports `"backend": "firebase"` when it's connected.
+
+Production mode's security rules block every browser from reading Firestore directly. Only the server, using the
+service-account key, can read or write. Every query is designed to need **no composite indexes**, so nothing has to
+be configured in the Firebase console beyond creating the database.
+
+Without `FIREBASE_SERVICE_ACCOUNT` (or Turso's `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN`), Vercel falls back to
+temporary per-instance storage and shows a **Demo mode** banner. In that mode sign-in and data are unreliable, because
+each server copy has its own data.
 
 **Optional settings:**
 - `INSTITUTION_PRIVATE_KEY`: bring your own signing key (`npm run key:export` prints the local one). Otherwise the server generates one into the database the first time it starts. Keeping the key in an env var is safer, because a database leak then doesn't expose it.
@@ -66,11 +79,11 @@ Vercel â†’ *Storage* â†’ *Create* â†’ **Turso**. Either way, the 
 - `INSTITUTION_NAME` and `PUBLIC_URL`: `PUBLIC_URL` defaults to the production domain.
 
 Limits on Vercel:
-- **Scan size:** uploads are capped at **4 MB**, because Vercel rejects request bodies over 4.5 MB. Scan at 150â€“200 dpi or compress the PDF.
+- **Scan size:** uploads are capped at **4 MB**, because Vercel rejects request bodies over 4.5 MB. Scan at 150–200 dpi or compress the PDF.
 - **QR address:** QR codes point at `PUBLIC_URL`. Certificates issued before a domain change keep the old link.
 - **Login lockout:** the failed-login counter is kept separately by each server instance.
 
-If the site shows "The server is not configured correctly", open *Vercel â†’ Project â†’ Logs*. The first line names the
+If the site shows "The server is not configured correctly", open *Vercel → Project → Logs*. The first line names the
 missing variable.
 
 ## The flow
@@ -99,12 +112,12 @@ falling back to the ID, hash and signature printed as text. That **locates** the
 [`backend/src/verify.js`](backend/src/verify.js) runs:
 
 ```
-QR / ID found in registry?            â”€â”€noâ”€â”€â–º  Not found           (QR to an unregistered ID = forged â†’ alert)
-Institution signature valid?          â”€â”€noâ”€â”€â–º  Invalid signature   (registry row edited without re-signing â†’ alert)
-QR hash = registered hash?            â”€â”€noâ”€â”€â–º  Tampered            (QR altered or copied â†’ alert)
-QR signature = registered signature?  â”€â”€noâ”€â”€â–º  Invalid signature   (forged QR â†’ alert)
-Revoked?                              â”€â”€yesâ”€â–º  Revoked             (revoked certificate presented â†’ alert)
-Every page = registered copy?         â”€â”€noâ”€â”€â–º  Tampered            (page edited / swapped / added / missing â†’ alert)
+QR / ID found in registry?            ──no──►  Not found           (QR to an unregistered ID = forged → alert)
+Institution signature valid?          ──no──►  Invalid signature   (registry row edited without re-signing → alert)
+QR hash = registered hash?            ──no──►  Tampered            (QR altered or copied → alert)
+QR signature = registered signature?  ──no──►  Invalid signature   (forged QR → alert)
+Revoked?                              ──yes─►  Revoked             (revoked certificate presented → alert)
+Every page = registered copy?         ──no──►  Tampered            (page edited / swapped / added / missing → alert)
                                               Verified
 ```
 
@@ -136,36 +149,36 @@ Every public check is stored with the verifier's name, organisation and email, p
 (QR scan / certificate ID / file), time and IP. The console polls every 5 seconds. New checks flash in the table, and
 the sidebar shows an unseen-count badge. Each certificate's page lists everyone who has verified it.
 
-## Demo script (â‰ˆ3 minutes)
+## Demo script (≈3 minutes)
 
-1. `npm run sample -- "Aarav Menon" 21CSE001`. Then sign in â†’ **Upload certificate** â†’ drop the sample scan, enter the same details â†’ **Generate**.
+1. `npm run sample -- "Aarav Menon" 21CSE001`. Then sign in → **Upload certificate** → drop the sample scan, enter the same details → **Generate**.
 2. **Download verified PDF** and open it: page 1 is the scan, page 2 is the QR verification page.
-3. Scan the QR with your phone (or click **Test verify** on the certificate page), then enter a name and organisation â†’ **Verified**, with the QR checks passing.
+3. Scan the QR with your phone (or click **Test verify** on the certificate page), then enter a name and organisation → **Verified**, with the QR checks passing.
 4. Switch back to the registrar console: the check appears in **Verifications** within 5 seconds.
-5. **Forged QR:** in the verify URL, change one character of `h=` â†’ **Tampered**.
-6. **Forged certificate page:** run `npm run tamper -- file DEG-CSE-2026-001`. This overwrites page 1 and keeps the genuine QR page. Upload `backend/data/DEG-CSE-2026-001-tampered.pdf` on the home page â†’ **Tampered**, "Certificate page 1 has been modified". **Alerts** in the admin panel lights up red.
-7. **Revoked:** on the certificate page, choose *Revoke* â†’ re-scan â†’ **Revoked**.
-8. **Database edit:** run `npm run tamper -- record DEG-CSE-2026-001 studentName=Someone` â†’ **Invalid signature**, with details hidden.
+5. **Forged QR:** in the verify URL, change one character of `h=` → **Tampered**.
+6. **Forged certificate page:** run `npm run tamper -- file DEG-CSE-2026-001`. This overwrites page 1 and keeps the genuine QR page. Upload `backend/data/DEG-CSE-2026-001-tampered.pdf` on the home page → **Tampered**, "Certificate page 1 has been modified". **Alerts** in the admin panel lights up red.
+7. **Revoked:** on the certificate page, choose *Revoke* → re-scan → **Revoked**.
+8. **Database edit:** run `npm run tamper -- record DEG-CSE-2026-001 studentName=Someone` → **Invalid signature**, with details hidden.
 
 ## API
 
 | Method | Path | Auth | Purpose |
 | ------ | ---- | ---- | ------- |
-| GET  | `/api/institution` | â€” | Name, public key, fingerprint |
-| POST | `/api/verify` | â€” | Multipart: `certificateId`, `qrHash`, `qrSignature`, `file` (any combination) plus `verifierName`, `verifierOrganization`, `verifierEmail` |
-| GET  | `/api/records/:id` | â€” | Raw signed record, for independent checking |
-| POST | `/api/admin/login` | â€” | Returns a bearer token (8 h) |
-| POST | `/api/admin/certificates` | âœ“ | Multipart: `file` + details â†’ ID, hash, signature, QR |
-| GET  | `/api/admin/certificates[/:id]` | âœ“ | List / detail (with QR and verification history) |
-| GET  | `/api/admin/certificates/:id/file[?version=original]` | âœ“ | Verified PDF, or the original scan |
-| POST | `/api/admin/certificates/:id/revoke` | âœ“ | Revoke with a reason |
-| GET  | `/api/admin/verifications[?after=&verdict=&q=]` | âœ“ | Public verification feed |
-| GET  | `/api/admin/verifications/count?after=` | âœ“ | Unseen count for the live badge |
+| GET  | `/api/institution` | — | Name, public key, fingerprint |
+| POST | `/api/verify` | — | Multipart: `certificateId`, `qrHash`, `qrSignature`, `file` (any combination) plus `verifierName`, `verifierOrganization`, `verifierEmail` |
+| GET  | `/api/records/:id` | — | Raw signed record, for independent checking |
+| POST | `/api/admin/login` | — | Returns a bearer token (8 h) |
+| POST | `/api/admin/certificates` | ✓ | Multipart: `file` + details → ID, hash, signature, QR |
+| GET  | `/api/admin/certificates[/:id]` | ✓ | List / detail (with QR and verification history) |
+| GET  | `/api/admin/certificates/:id/file[?version=original]` | ✓ | Verified PDF, or the original scan |
+| POST | `/api/admin/certificates/:id/revoke` | ✓ | Revoke with a reason |
+| GET  | `/api/admin/verifications[?after=&verdict=&q=]` | ✓ | Public verification feed |
+| GET  | `/api/admin/verifications/count?after=` | ✓ | Unseen count for the live badge |
 | GET  | `/api/registered/:id?exp=&sig=` | signed link | Registered copy, for side-by-side comparison (link from a verification) |
-| GET  | `/api/admin/alerts[?status=open\|acknowledged\|all]` | âœ“ | Malpractice alerts |
-| GET  | `/api/admin/alerts/count` | âœ“ | Open alert count for the badge |
-| POST | `/api/admin/alerts/:id/ack` | âœ“ | Acknowledge with an optional note |
-| GET  | `/api/admin/stats`, `/api/admin/audit` | âœ“ | Dashboard numbers, registrar audit log |
+| GET  | `/api/admin/alerts[?status=open\|acknowledged\|all]` | ✓ | Malpractice alerts |
+| GET  | `/api/admin/alerts/count` | ✓ | Open alert count for the badge |
+| POST | `/api/admin/alerts/:id/ack` | ✓ | Acknowledge with an optional note |
+| GET  | `/api/admin/stats`, `/api/admin/audit` | ✓ | Dashboard numbers, registrar audit log |
 
 ## Security notes and what's next
 

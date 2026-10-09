@@ -1,6 +1,6 @@
+// SQL backend (used by store/sql.js): a SQLite file via node:sqlite, or Turso over HTTP.
 import fs from 'node:fs';
 import path from 'node:path';
-import { hashPassword } from './crypto.js';
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
@@ -152,31 +152,4 @@ async function migrate(db) {
       }
     }
   }
-}
-
-export async function seed(db, cfg) {
-  if ((await db.get('SELECT COUNT(*) AS n FROM users')).n === 0) {
-    // OR IGNORE: two cold-starting instances may both get here.
-    const r = await db.run(
-      'INSERT OR IGNORE INTO users (email, name, password_hash, created_at) VALUES (?, ?, ?, ?)',
-      cfg.adminEmail,
-      'Registrar',
-      hashPassword(cfg.adminPassword),
-      new Date().toISOString(),
-    );
-    if (r.rowsAffected) console.log(`[seed] created registrar account ${cfg.adminEmail} (password from ADMIN_PASSWORD)`);
-  }
-}
-
-// Registrar actions (sign-in, uploads, revocations). Public checks go to `verifications`.
-export function audit(db, { action, certId = null, detail = null, actor = null, ip = null }) {
-  return db.run(
-    'INSERT INTO audit_events (at, action, cert_id, detail, actor, ip) VALUES (?, ?, ?, ?, ?, ?)',
-    new Date().toISOString(),
-    action,
-    certId ?? null,
-    detail ?? null,
-    actor ?? null,
-    ip ?? null,
-  );
 }

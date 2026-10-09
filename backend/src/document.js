@@ -272,14 +272,15 @@ export async function readDocument(buf) {
   return { kind: 'unknown', readable: false, pages: [] };
 }
 
-// The registered verified PDF never changes, so its page fingerprints can be cached per instance.
+// A registered PDF never changes, so its page fingerprints are cached per instance, keyed by the PDF's
+// own SHA-256 (not the certificate ID, which a reset or different database may reuse for another file).
 const registeredCache = new Map();
-export async function registeredPages(certId, stampedBuf) {
-  if (!registeredCache.has(certId)) {
+export async function registeredPages(stampedHash, loadPdf) {
+  if (!registeredCache.has(stampedHash)) {
     if (registeredCache.size > 200) registeredCache.clear();
-    registeredCache.set(certId, (await readPdf(stampedBuf)).pages);
+    registeredCache.set(stampedHash, (await readPdf(await loadPdf())).pages);
   }
-  return registeredCache.get(certId);
+  return registeredCache.get(stampedHash);
 }
 
 // Page-by-page comparison of an uploaded PDF with the registered verified PDF

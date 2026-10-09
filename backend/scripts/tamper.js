@@ -8,7 +8,7 @@ import path from 'node:path';
 import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 import { config } from '../src/config.js';
 import { canonicalize } from '../src/crypto.js';
-import { openDb } from '../src/db.js';
+import { openStore, storageLabel } from '../src/store/index.js';
 import { normalizeId } from '../src/verify.js';
 
 const [mode, rawId, ...edits] = process.argv.slice(2);
@@ -18,10 +18,10 @@ if (!['record', 'file', 'export'].includes(mode) || !id) {
   process.exit(1);
 }
 
-const db = await openDb(config);
-const row = await db.get('SELECT id, payload, stamped FROM certificates WHERE id = ?', id);
+const store = await openStore(config);
+const row = await store.getCertificate(id);
 if (!row) {
-  console.error(`No certificate ${id} in ${config.databaseUrl ? 'the Turso database' : config.dataDir}`);
+  console.error(`No certificate ${id} in the ${storageLabel(config)} storage`);
   process.exit(1);
 }
 
@@ -33,11 +33,11 @@ if (mode === 'record') {
     const value = rest.join('=');
     payload[key] = value !== '' && !Number.isNaN(Number(value)) ? Number(value) : value;
   }
-  await db.run('UPDATE certificates SET payload = ? WHERE id = ?', canonicalize(payload), id);
+  await store.updateCertificatePayload(id, canonicalize(payload));
   console.log(`Edited registry record ${id}: ${changes.join(', ')} (signature left unchanged).`);
 } else {
   const out = path.join(config.dataDir, mode === 'file' ? `${id}-tampered.pdf` : `${id}-verified.pdf`);
-  let bytes = Buffer.from(row.stamped);
+  let bytes = (await store.getCertificateFile(id, 'stamped')).file;
   if (mode === 'file') {
     // Forge the certificate page the way a cheater would: write over it, keep the genuine QR page.
     const doc = await PDFDocument.load(bytes);
@@ -51,4 +51,4 @@ if (mode === 'record') {
   fs.writeFileSync(out, bytes);
   console.log(`Wrote ${out}`);
 }
-db.close();
+store.close();

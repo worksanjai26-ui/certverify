@@ -1,23 +1,14 @@
 import { canonicalize, sha256, signPayload } from './crypto.js';
 import { buildVerifiedPdf } from './stamp.js';
 
-async function nextId(db, department, year) {
-  const prefix = `DEG-${department}-${year}-`;
-  const last = await db.get('SELECT id FROM certificates WHERE id LIKE ? ORDER BY id DESC LIMIT 1', `${prefix}%`);
-  const n = last ? Number(last.id.slice(prefix.length)) + 1 : 1;
-  return `${prefix}${String(n).padStart(3, '0')}`;
-}
-
 export const verifyUrlFor = (cfg, id) => `${cfg.publicUrl}/verify/${id}`;
 
 // Everything the QR carries: certificate ID, document hash and signature, as a link to this portal.
 export const qrTextFor = (cfg, id, documentHash, signature) =>
   `${verifyUrlFor(cfg, id)}?h=${documentHash}&s=${signature}`;
 
-const isUniqueViolation = (e, column) => /UNIQUE constraint failed/i.test(e?.message) && e.message.includes(column);
-
-async function registerOnce({ db, keys, cfg }, { file, type, fileName, details, actor }) {
-  const id = await nextId(db, details.department, details.graduationYear);
+async function registerOnce({ store, keys, cfg }, { file, type, fileName, details, actor }) {
+  const id = await store.nextCertificateId(`DEG-${details.department}-${details.graduationYear}-`);
   const documentHash = sha256(file);
   const issuedAt = new Date().toISOString();
   const payload = canonicalize({
@@ -50,44 +41,43 @@ async function registerOnce({ db, keys, cfg }, { file, type, fileName, details, 
     qrTextFor(cfg, id, documentHash, signature),
   );
 
-  await db.run(
-    `INSERT INTO certificates (id, student_name, roll_no, program, department, graduation_year, payload, signature, key_id,
-       document_hash, document_type, document_name, original, stamped_hash, stamped, status, issued_at, issued_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-    id,
-    details.studentName,
-    details.rollNo,
-    details.program,
-    details.department,
-    details.graduationYear,
-    payload,
-    signature,
-    keys.keyId,
-    documentHash,
-    type,
-    fileName ?? null,
+  await store.insertCertificate(
+    {
+      id,
+      student_name: details.studentName,
+      roll_no: details.rollNo,
+      program: details.program,
+      department: details.department,
+      graduation_year: details.graduationYear,
+      payload,
+      signature,
+      key_id: keys.keyId,
+      document_hash: documentHash,
+      document_type: type,
+      document_name: fileName ?? null,
+      stamped_hash: sha256(stamped),
+      issued_at: issuedAt,
+      issued_by: actor,
+    },
     file,
-    sha256(stamped),
     stamped,
-    issuedAt,
-    actor,
   );
   return id;
 }
 
-// Another server instance may claim the same sequence number between our read and insert.
+// With SQL, another server instance may claim the same sequence number between our read and insert.
 // The ID is printed inside the PDF, so on a clash we redo the whole thing with the next number.
 async function register(ctx, input) {
   for (let attempt = 1; ; attempt++) {
     try {
       return await registerOnce(ctx, input);
     } catch (e) {
-      if (isUniqueViolation(e, 'document_hash')) {
+      if (e.code === 'duplicate-file') {
         const err = new Error('This exact file is already registered.');
         err.status = 409;
         throw err;
       }
-      if (!isUniqueViolation(e, 'certificates.id') || attempt >= 5) throw e;
+      if (e.code !== 'duplicate-id' || attempt >= 5) throw e;
     }
   }
 }

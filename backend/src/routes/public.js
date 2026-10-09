@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import express from 'express';
 import multer from 'multer';
+import { storageLabel } from '../store/index.js';
 import { normalizeId, verifyCertificate } from '../verify.js';
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -22,7 +23,7 @@ function parseVerifier(b) {
   return { name, org, email };
 }
 
-export function publicRouter({ db, keys, cfg }) {
+export function publicRouter({ store, keys, cfg }) {
   const router = express.Router();
   // Short-lived signed links to the registered copy, keyed off the institution key.
   const viewSecret = crypto
@@ -46,6 +47,7 @@ export function publicRouter({ db, keys, cfg }) {
       publicKeyPem: keys.publicKeyPem,
       maxUploadMb: cfg.maxUploadMb,
       storage: cfg.ephemeral ? 'temporary' : 'persistent',
+      backend: storageLabel(cfg),
     }),
   );
 
@@ -62,7 +64,7 @@ export function publicRouter({ db, keys, cfg }) {
       return res.status(400).json({ error: 'Scan the QR code, enter a certificate ID, or upload the certificate file.' });
     }
 
-    const result = await verifyCertificate(db, keys, { certificateId, qrHash, qrSignature, file: req.file?.buffer });
+    const result = await verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, file: req.file?.buffer });
     const method =
       [qrHash || qrSignature ? 'QR scan' : certificateId ? 'Certificate ID' : null, req.file ? 'document upload' : null]
         .filter(Boolean)
@@ -70,41 +72,35 @@ export function publicRouter({ db, keys, cfg }) {
       (!certificateId && result.document?.locator?.source === 'qr' ? ' (QR read from file)' : '');
 
     const notable = result.findings.filter((f) => f.severity !== 'info');
-    const v = await db.run(
-      `INSERT INTO verifications (at, cert_id, verdict, method, verifier_name, verifier_org, verifier_email, ip, user_agent, malpractice, findings)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      result.checkedAt,
-      result.certificateId,
-      result.verdict,
+    const who = {
+      verifier_name: verifier.name,
+      verifier_org: verifier.org,
+      verifier_email: verifier.email ?? null,
+      ip: req.ip ?? null,
+    };
+    const verificationId = await store.addVerification({
+      at: result.checkedAt,
+      cert_id: result.certificateId ?? null,
+      verdict: result.verdict,
       method,
-      verifier.name,
-      verifier.org,
-      verifier.email,
-      req.ip,
-      String(req.get('user-agent') ?? '').slice(0, 300) || null,
-      result.malpractice ? 1 : 0,
-      result.findings.length ? JSON.stringify(result.findings) : null,
-    );
+      ...who,
+      user_agent: String(req.get('user-agent') ?? '').slice(0, 300) || null,
+      malpractice: result.malpractice,
+      findings: result.findings.length ? JSON.stringify(result.findings) : null,
+    });
 
     // Malpractice reaches the registrar as an alert in the admin panel.
     if (result.malpractice) {
-      const severity = notable.some((f) => f.severity === 'high') ? 'high' : 'medium';
-      const alert = await db.run(
-        `INSERT INTO alerts (at, verification_id, cert_id, verdict, severity, title, findings, verifier_name, verifier_org, verifier_email, ip)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        result.checkedAt,
-        Number(v.lastInsertRowid),
-        result.certificateId,
-        result.verdict,
-        severity,
-        notable[0].message.slice(0, 300),
-        JSON.stringify(notable),
-        verifier.name,
-        verifier.org,
-        verifier.email,
-        req.ip,
-      );
-      result.alertId = Number(alert.lastInsertRowid);
+      result.alertId = await store.addAlert({
+        at: result.checkedAt,
+        verification_id: verificationId,
+        cert_id: result.certificateId ?? null,
+        verdict: result.verdict,
+        severity: notable.some((f) => f.severity === 'high') ? 'high' : 'medium',
+        title: notable[0].message.slice(0, 300),
+        findings: JSON.stringify(notable),
+        ...who,
+      });
     }
 
     // Someone holding the document (file or its QR) may open the registered copy to compare visually.
@@ -125,20 +121,17 @@ export function publicRouter({ db, keys, cfg }) {
       sig.length === expected.length &&
       crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
     if (!valid) return res.status(403).json({ error: 'This link has expired. Verify the document again to get a new one.' });
-    const row = await db.get('SELECT stamped FROM certificates WHERE id = ?', id);
-    if (!row) return res.status(404).json({ error: 'Certificate not found.' });
+    const copy = await store.getCertificateFile(id, 'stamped');
+    if (!copy) return res.status(404).json({ error: 'Certificate not found.' });
     res.set('Content-Type', 'application/pdf');
     res.set('Content-Disposition', `inline; filename="${id}-registered.pdf"`);
     res.set('Cache-Control', 'private, no-store');
-    res.send(Buffer.from(row.stamped));
+    res.send(copy.file);
   });
 
   // Raw signed record, for independent verification with the public key.
   router.get('/records/:id', async (req, res) => {
-    const row = await db.get(
-      'SELECT id, payload, signature, key_id, status FROM certificates WHERE id = ?',
-      normalizeId(req.params.id),
-    );
+    const row = await store.getCertificate(normalizeId(req.params.id));
     if (!row) return res.status(404).json({ error: 'Certificate not found.' });
     res.json({ id: row.id, payload: row.payload, signature: row.signature, keyId: row.key_id, status: row.status });
   });

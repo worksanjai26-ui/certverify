@@ -17,6 +17,7 @@
   "dependencies": {
     "@libsql/client": "^0.15.15",
     "express": "^5.1.0",
+    "firebase-admin": "^13.10.0",
     "jpeg-js": "^0.4.4",
     "jsqr": "^1.4.0",
     "multer": "^2.0.2",

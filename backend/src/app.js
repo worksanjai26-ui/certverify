@@ -2,19 +2,25 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { backendRoot, config } from './config.js';
-import { openDb, seed } from './db.js';
-import { resolveKeys } from './crypto.js';
+import { hashPassword, resolveKeys } from './crypto.js';
 import { createAuth } from './auth.js';
+import { openStore } from './store/index.js';
 import { publicRouter } from './routes/public.js';
 import { adminRouter } from './routes/admin.js';
 
+// The registrar account is created on first start (from ADMIN_EMAIL / ADMIN_PASSWORD or the seed defaults).
+async function seedAdmin(store, cfg) {
+  const created = await store.ensureAdmin({ email: cfg.adminEmail, name: 'Registrar', passwordHash: hashPassword(cfg.adminPassword) });
+  if (created) console.log(`[seed] created registrar account ${cfg.adminEmail} (password from ADMIN_PASSWORD)`);
+}
+
 export async function createApp(overrides = {}) {
   const cfg = { ...config, ...overrides };
-  const db = await openDb(cfg);
-  const keys = await resolveKeys(cfg, db);
-  await seed(db, cfg);
-  const auth = createAuth(db, cfg);
-  const ctx = { db, keys, auth, cfg };
+  const store = await openStore(cfg);
+  const keys = await resolveKeys(cfg, store);
+  await seedAdmin(store, cfg);
+  const auth = createAuth(store, cfg);
+  const ctx = { store, keys, auth, cfg };
 
   const app = express();
   app.disable('x-powered-by');

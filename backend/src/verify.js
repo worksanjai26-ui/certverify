@@ -33,18 +33,14 @@ export function publicDetails(p) {
   };
 }
 
-// Leaves out the two file blobs; the registered PDF is only fetched when a document needs comparing.
-const ROW_COLUMNS = 'id, payload, signature, key_id, document_hash, stamped_hash, status, revoked_at, revoke_reason';
-
-async function findRow(db, id, fileHash) {
-  if (id) return db.get(`SELECT ${ROW_COLUMNS} FROM certificates WHERE id = ?`, id);
-  if (fileHash) {
-    return db.get(`SELECT ${ROW_COLUMNS} FROM certificates WHERE document_hash = ? OR stamped_hash = ?`, fileHash, fileHash);
-  }
+// The registered PDF itself is only fetched when a document needs comparing.
+async function findRow(store, id, fileHash) {
+  if (id) return store.getCertificate(id);
+  if (fileHash) return store.findCertificateByFileHash(fileHash);
   return undefined;
 }
 
-export async function verifyCertificate(db, keys, { certificateId, qrHash, qrSignature, file }) {
+export async function verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, file }) {
   const steps = newSteps();
   const findings = [];
   const flag = (severity, code, message) => findings.push({ severity, code, message });
@@ -86,7 +82,7 @@ export async function verifyCertificate(db, keys, { certificateId, qrHash, qrSig
   if (qr.hash) evidence.qrHash = qr.hash;
   if (qr.signature) evidence.qrSignature = qr.signature;
 
-  let row = await findRow(db, id, id ? null : fileHash);
+  const row = await findRow(store, id, id ? null : fileHash);
   if (!id && row) locatedBy = 'exact file match';
 
   const finish = (verdict, extra = {}) => ({
@@ -200,8 +196,7 @@ export async function verifyCertificate(db, keys, { certificateId, qrHash, qrSig
   }
 
   if (doc.kind === 'pdf' && doc.readable) {
-    const stamped = await db.get('SELECT stamped FROM certificates WHERE id = ?', row.id);
-    const registered = await registeredPages(row.id, Buffer.from(stamped.stamped));
+    const registered = await registeredPages(row.stamped_hash, async () => (await store.getCertificateFile(row.id, 'stamped')).file);
     const { rows, rasterised } = comparePages(doc.pages, registered);
     document.comparison = { identicalFile: false, registeredPageCount: registered.length, rows };
 
