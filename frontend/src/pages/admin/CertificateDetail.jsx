@@ -80,6 +80,8 @@ export default function CertificateDetail() {
             <dd>{c.department}</dd>
             <dt>Year of graduation</dt>
             <dd>{c.graduationYear}</dd>
+            <dt>Marks / result</dt>
+            <dd>{c.marks || <span className="muted">not recorded</span>}</dd>
             <dt>Registered</dt>
             <dd>
               {formatDate(c.issuedAt, true)} by {c.issuedBy}

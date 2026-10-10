@@ -1,6 +1,7 @@
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { formatDate } from '../api.js';
-import { CopyButton } from './ui.jsx';
+import { api, formatDate } from '../api.js';
+import { CopyButton, ErrorBox } from './ui.jsx';
 
 export const VERDICTS = {
   verified: {
@@ -199,13 +200,122 @@ export function DocumentComparison({ result }) {
   );
 }
 
-export default function VerdictView({ result }) {
+// A genuine QR can be screenshotted onto a fake certificate. The software can't see the paper in the
+// verifier's hand, so it shows exactly what the QR / registry says and lets the verifier report a mismatch.
+export function CompareWithPaper({ result, verifier }) {
+  const c = result.certificate;
+  const [open, setOpen] = useState(false);
+  const [shown, setShown] = useState('');
+  const [state, setState] = useState({ busy: false, alertId: null, error: null });
+  if (!c) return null;
+
+  const rows = result.qrDetails?.length
+    ? result.qrDetails
+    : [
+        ['Student name', c.studentName],
+        ['Roll / register no.', c.rollNo],
+        ['Marks / result', c.marks],
+        ['Year of graduation', c.graduationYear],
+      ]
+        .filter(([, v]) => v != null && v !== '')
+        .map(([label, v]) => ({ label, qr: null, registry: String(v), match: true }));
+  const fromQr = Boolean(result.qrDetails?.length);
+
+  async function report(e) {
+    e.preventDefault();
+    setState({ busy: true, alertId: null, error: null });
+    try {
+      const r = await api('/report-mismatch', {
+        method: 'POST',
+        body: {
+          certificateId: result.certificateId,
+          shownDetails: shown,
+          verifierName: verifier?.name,
+          verifierOrganization: verifier?.organization,
+          verifierEmail: verifier?.email,
+        },
+      });
+      setState({ busy: false, alertId: r.alertId, error: null });
+    } catch (err) {
+      setState({ busy: false, alertId: null, error: err });
+    }
+  }
+
+  return (
+    <div className="card compare-card">
+      <div className="card-title">{fromQr ? 'What this QR code says' : 'What the registry says'}: compare with the paper</div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Detail</th>
+              {fromQr && <th>In the QR code</th>}
+              <th>Official registry</th>
+              {fromQr && <th />}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((d) => (
+              <tr key={d.label}>
+                <td className="small muted">{d.label}</td>
+                {fromQr && <td className="compare-value">{d.qr}</td>}
+                <td className="compare-value">{d.registry ?? '—'}</td>
+                {fromQr && (
+                  <td>
+                    <span className={`badge tone-${d.match ? 'ok' : 'bad'}`}>{d.match ? 'Matches' : 'Edited'}</span>
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="callout small" style={{ marginTop: 14 }}>
+        <strong>The certificate in front of you must show exactly these details.</strong> If its name, roll number or
+        marks are different (for example the paper says 90% but this says 77%), a genuine QR code has been copied onto
+        a fake certificate. Do not accept it.
+      </div>
+
+      {state.alertId ? (
+        <div className="error-box" style={{ marginTop: 12 }}>
+          Reported. The registrar has been notified (alert #{state.alertId}). Do not accept this certificate.
+        </div>
+      ) : !open ? (
+        <div className="row" style={{ marginTop: 12 }}>
+          <button className="btn danger sm" onClick={() => setOpen(true)}>
+            ✕ The certificate shows different details
+          </button>
+          <span className="small muted">Report it to the college.</span>
+        </div>
+      ) : (
+        <form className="stack" style={{ gap: 10, marginTop: 12 }} onSubmit={report}>
+          <label className="field">
+            What does the certificate in front of you show? <span className="hint">Optional, e.g. "90%, First Class"</span>
+            <input value={shown} onChange={(e) => setShown(e.target.value)} maxLength={300} autoFocus />
+          </label>
+          <div className="row">
+            <button className="btn danger" disabled={state.busy}>
+              {state.busy ? 'Reporting…' : 'Report to the registrar'}
+            </button>
+            <button type="button" className="btn ghost" onClick={() => setOpen(false)}>
+              Cancel
+            </button>
+          </div>
+          <ErrorBox error={state.error} />
+        </form>
+      )}
+    </div>
+  );
+}
+
+export default function VerdictView({ result, verifier }) {
   const c = result.certificate;
   const e = result.evidence;
   return (
     <div className="stack">
       <VerdictBanner verdict={result.verdict} certificateId={result.certificateId} checkedAt={result.checkedAt} />
       <Findings result={result} />
+      <CompareWithPaper result={result} verifier={verifier} />
       <DocumentComparison result={result} />
 
       <div className="grid grid-2">
@@ -228,6 +338,14 @@ export default function VerdictView({ result }) {
               <dd>{c.department}</dd>
               <dt>Year of graduation</dt>
               <dd>{c.graduationYear}</dd>
+              {c.marks && (
+                <>
+                  <dt>Marks / result</dt>
+                  <dd>
+                    <strong>{c.marks}</strong>
+                  </dd>
+                </>
+              )}
               <dt>Institution</dt>
               <dd>{c.institution}</dd>
               <dt>Registered</dt>

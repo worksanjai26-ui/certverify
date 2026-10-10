@@ -5,13 +5,17 @@ import { FileDrop, Loading } from '../components/ui.jsx';
 import VerdictView, { VerdictBanner } from '../components/VerdictView.jsx';
 import VerifierForm, { VerifierLine } from '../components/VerifierForm.jsx';
 
-// Handles every way in: /verify/:id?h=&s= (QR scan), /verify/:id (typed ID), /verify with a file in state.
+// The QR link's query: h = hash, s = signature, n/r/m/y = name, roll number, marks, year.
+const QR_PARAMS = { h: 'qrHash', s: 'qrSignature', n: 'qrName', r: 'qrRoll', m: 'qrMarks', y: 'qrYear' };
+
+// Handles every way in: /verify/:id?h=&s=&n=… (QR scan), /verify/:id (typed ID), /verify with a file in state.
 export default function Verify() {
   const { id } = useParams();
   const [params] = useSearchParams();
   const location = useLocation();
   const qrHash = params.get('h');
   const qrSignature = params.get('s');
+  const qrQuery = params.toString(); // stable key for the effect below
   const initialFile = location.state?.file ?? null;
 
   const [verifier, setVerifier] = useState(loadVerifier);
@@ -27,8 +31,10 @@ export default function Verify() {
       setError(null);
       const form = new FormData();
       if (id) form.append('certificateId', id);
-      if (qrHash) form.append('qrHash', qrHash);
-      if (qrSignature) form.append('qrSignature', qrSignature);
+      for (const [param, field] of Object.entries(QR_PARAMS)) {
+        const value = params.get(param);
+        if (value) form.append(field, value);
+      }
       form.append('verifierName', verifier.name);
       form.append('verifierOrganization', verifier.organization);
       if (verifier.email) form.append('verifierEmail', verifier.email);
@@ -41,7 +47,8 @@ export default function Verify() {
         setLoading(false);
       }
     },
-    [id, qrHash, qrSignature, verifier],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [id, qrQuery, verifier],
   );
 
   // Each check is logged for the registrar, so run once per target + verifier
@@ -49,13 +56,13 @@ export default function Verify() {
   const lastRun = useRef(null);
   useEffect(() => {
     if (!verifier || editingVerifier || (!id && !initialFile)) return;
-    const key = JSON.stringify([id, qrHash, qrSignature, verifier]);
+    const key = JSON.stringify([id, qrQuery, verifier]);
     if (lastRun.current === key) return;
     lastRun.current = key;
     run(file);
     // File uploads after the first check call run() directly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id, qrHash, qrSignature, verifier, editingVerifier]);
+  }, [id, qrQuery, verifier, editingVerifier]);
 
   if (!id && !initialFile) return <Navigate to="/" replace />;
 
@@ -64,8 +71,15 @@ export default function Verify() {
       <div className="stack">
         {qrHash && (
           <div className="callout small">
-            <strong>QR code read.</strong> Certificate <code>{id}</code> with its hash and signature is ready to be
-            checked against the registry.
+            <strong>QR code read.</strong> Certificate <code>{id}</code>
+            {params.get('n') && (
+              <>
+                {' '}
+                for <strong>{params.get('n')}</strong>
+                {params.get('m') && <> ({params.get('m')})</>}
+              </>
+            )}{' '}
+            is ready to be checked against the registry.
           </div>
         )}
         <VerifierForm
@@ -106,7 +120,7 @@ export default function Verify() {
 
       {!loading && !error && result && (
         <>
-          <VerdictView result={result} />
+          <VerdictView result={result} verifier={verifier} />
           {/* After an ID/QR check, offer the full document comparison. */}
           {!file && ['verified', 'tampered', 'review'].includes(result.verdict) && result.certificateId && (
             <div className="card">

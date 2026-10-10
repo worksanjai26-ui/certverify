@@ -25,10 +25,7 @@ export default function Scan() {
 
   const handleText = (text) => {
     const parsed = parseQrText(text, trustedOrigins);
-    if (parsed.id) {
-      const qs = parsed.h || parsed.s ? `?${new URLSearchParams({ h: parsed.h ?? '', s: parsed.s ?? '' })}` : '';
-      navigate(`/verify/${encodeURIComponent(parsed.id)}${qs}`);
-    }
+    if (parsed.id) navigate(`/verify/${encodeURIComponent(parsed.id)}${parsed.search ?? ''}`);
     else if (parsed.foreignUrl) setForeign(parsed);
     else setMessage("That QR code doesn't contain a certificate link.");
   };

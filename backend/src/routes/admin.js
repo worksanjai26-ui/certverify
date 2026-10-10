@@ -19,6 +19,7 @@ function summarize(row) {
     program: p.program,
     department: p.department,
     graduationYear: p.graduationYear,
+    marks: p.marks ?? null,
     institution: p.institution,
     status: row.status,
     issuedAt: row.issued_at,
@@ -42,8 +43,11 @@ function parseDetails(b) {
     program: norm(b.program),
     department: norm(b.department).toUpperCase(),
     graduationYear: Number(b.graduationYear),
+    // Free text as printed on the certificate: "77%", "8.2 CGPA", "First Class with Distinction".
+    marks: norm(b.marks),
   };
   const errors = [];
+  if (d.marks.length > 60) errors.push('Marks / result must be at most 60 characters.');
   if (d.studentName.length < 2 || d.studentName.length > 120) errors.push('Student name is required.');
   if (!/^[A-Z0-9/-]{2,30}$/.test(d.rollNo)) errors.push('Roll / register number must be 2-30 letters, digits, / or -.');
   if (d.program.length < 2 || d.program.length > 150) errors.push('Degree is required.');
@@ -65,7 +69,7 @@ export function adminRouter(ctx) {
   async function certificateResponse(id) {
     const row = await store.getCertificate(id);
     if (!row) return null;
-    const qrText = qrTextFor(cfg, row.id, row.document_hash, row.signature);
+    const qrText = qrTextFor(cfg, row.id, row.document_hash, row.signature, JSON.parse(row.payload));
     return {
       certificate: summarize(row),
       verifyUrl: verifyUrlFor(cfg, row.id),

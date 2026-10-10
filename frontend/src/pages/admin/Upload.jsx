@@ -10,6 +10,7 @@ const BLANK = {
   program: 'Bachelor of Technology',
   department: '',
   graduationYear: String(new Date().getFullYear()),
+  marks: '',
 };
 const ACCEPT = 'application/pdf,.pdf,image/jpeg,.jpg,.jpeg,image/png,.png';
 
@@ -93,6 +94,7 @@ export default function Upload() {
               <p className="holder-name">{c.studentName}</p>
               <p className="muted">
                 {c.program} · {c.department} · {c.graduationYear}
+                {c.marks && <> · <strong>{c.marks}</strong></>}
               </p>
               <dl className="details">
                 <dt>Certificate ID</dt>
@@ -207,6 +209,11 @@ export default function Upload() {
               <input type="number" min="1950" max="2100" value={form.graduationYear} onChange={set('graduationYear')} required />
             </label>
           </div>
+          <label className="field">
+            Marks / percentage / CGPA{' '}
+            <span className="hint">As printed, e.g. "77%" or "8.2 CGPA, First Class". Signed and shown in the QR code.</span>
+            <input value={form.marks} onChange={set('marks')} maxLength={60} placeholder="77%" />
+          </label>
           <ErrorBox error={error} />
           {error?.data?.existingId && (
             <Link to={`/admin/certificates/${error.data.existingId}`} className="small">

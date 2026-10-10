@@ -69,9 +69,19 @@ function defineSuite(label, makeOverrides) {
     }
 
     const verify = (fields, file) => call('POST', '/verify', { form: formOf({ ...VERIFIER, ...fields }, file), auth: false });
+    // What the verify page sends after a QR scan.
     const qrFields = (qrText) => {
       const u = new URL(qrText);
-      return { certificateId: u.pathname.split('/').pop(), qrHash: u.searchParams.get('h'), qrSignature: u.searchParams.get('s') };
+      const p = (k) => u.searchParams.get(k) ?? undefined;
+      return {
+        certificateId: u.pathname.split('/').pop(),
+        qrHash: p('h'),
+        qrSignature: p('s'),
+        qrName: p('n'),
+        qrRoll: p('r'),
+        qrMarks: p('m'),
+        qrYear: p('y'),
+      };
     };
 
     before(async () => {
@@ -256,6 +266,82 @@ function defineSuite(label, makeOverrides) {
     }
 
     const openAlerts = async () => (await call('GET', '/admin/alerts?status=open')).data.alerts;
+
+    describe('QR details (copied-QR scenario)', () => {
+      // Puts a screenshot of a genuine QR onto a brand-new fake certificate page.
+      async function fakeCertificateWithQr(qrText, fakeText) {
+        const doc = await PDFDocument.create();
+        const page = doc.addPage([595, 842]);
+        const font = await doc.embedFont(StandardFonts.HelveticaBold);
+        page.drawText(fakeText, { x: 60, y: 720, size: 18, font });
+        const qr = await doc.embedPng(await QRCode.toBuffer(qrText, { width: 500 }));
+        page.drawImage(qr, { x: 360, y: 60, width: 180, height: 180 });
+        return Buffer.from(await doc.save());
+      }
+
+      test('the QR carries name, roll number, marks and year, and they match the signed record', async () => {
+        const r = await register(await scannedPdf('U'), { studentName: 'Kavya Nair', rollNo: '21CSE777', marks: '77%' });
+        const u = new URL(r.qrText);
+        assert.equal(u.searchParams.get('m'), '77%');
+        assert.equal(u.searchParams.get('n'), 'Kavya Nair');
+        assert.equal(r.certificate.marks, '77%');
+        assert.equal(JSON.parse((await ctx.store.getCertificate(r.certificate.id)).payload).marks, '77%', 'marks are signed');
+
+        const res = (await verify(qrFields(r.qrText))).data;
+        assert.equal(res.verdict, 'verified');
+        assert.equal(res.certificate.marks, '77%');
+        assert.deepEqual(
+          res.qrDetails.map((d) => [d.field, d.qr, d.match]),
+          [
+            ['name', 'Kavya Nair', true],
+            ['roll', '21CSE777', true],
+            ['marks', '77%', true],
+            ['year', '2026', true],
+          ],
+        );
+      });
+
+      test('a QR whose marks were edited (77% -> 90%) is tampered', async () => {
+        const r = await register(await scannedPdf('V'), { marks: '77%' });
+        const res = (await verify({ ...qrFields(r.qrText), qrMarks: '90%' })).data;
+        assert.equal(res.verdict, 'tampered');
+        assert.equal(res.malpractice, true);
+        assert.ok(res.findings.some((f) => f.code === 'qr-details' && f.message.includes('"90%"') && f.message.includes('"77%"')));
+        assert.equal(res.qrDetails.find((d) => d.field === 'marks').match, false);
+      });
+
+      test('a genuine QR screenshot pasted onto a fake certificate is caught when the document is uploaded', async () => {
+        const r = await register(await scannedPdf('W'), { studentName: 'Kavya Nair', marks: '77%' });
+        const fake = await fakeCertificateWithQr(r.qrText, 'DEGREE CERTIFICATE - Kavya Nair - 90% Distinction');
+        const res = (await verify({}, fake)).data;
+        assert.equal(res.certificateId, r.certificate.id, 'the copied QR still leads to the genuine record');
+        assert.equal(res.verdict, 'tampered');
+        assert.equal(res.malpractice, true);
+        assert.equal(res.qrDetails.find((d) => d.field === 'marks').qr, '77%', 'the output shows what the QR really says');
+        assert.ok(res.alertId);
+      });
+
+      test('a verifier can report that the paper differs from the QR, which alerts the registrar', async () => {
+        const r = await register(await scannedPdf('X'), { marks: '77%' });
+        const report = await call('POST', '/report-mismatch', {
+          auth: false,
+          body: { ...VERIFIER, certificateId: r.certificate.id, shownDetails: 'Certificate shows 90%' },
+        });
+        assert.equal(report.status, 201);
+        const alerts = (await call('GET', `/admin/alerts?certId=${r.certificate.id}`)).data.alerts;
+        assert.ok(alerts.some((a) => a.id === report.data.alertId && a.findings[0].code === 'reported-mismatch'));
+        assert.match(alerts[0].findings[0].message, /90%/);
+
+        assert.equal((await call('POST', '/report-mismatch', { auth: false, body: { ...VERIFIER, certificateId: 'DEG-CSE-2026-998' } })).status, 404);
+        assert.equal((await call('POST', '/report-mismatch', { auth: false, body: { certificateId: r.certificate.id } })).status, 400);
+      });
+
+      test('certificates registered without marks still verify (marks are optional)', async () => {
+        const r = await register(await scannedPdf('Y'));
+        assert.equal(new URL(r.qrText).searchParams.get('m'), null);
+        assert.equal((await verify(qrFields(r.qrText))).data.verdict, 'verified');
+      });
+    });
 
     describe('document verification and malpractice', () => {
       test('the QR on the last page locates the certificate and every page is compared', async () => {

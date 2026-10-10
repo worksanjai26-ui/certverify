@@ -60,11 +60,18 @@ export function publicRouter({ store, keys, cfg }) {
     const certificateId = text(b.certificateId, 60);
     const qrHash = text(b.qrHash, 200);
     const qrSignature = text(b.qrSignature, 200);
+    const qrDetails = { name: text(b.qrName, 120), roll: text(b.qrRoll, 30), marks: text(b.qrMarks, 60), year: text(b.qrYear, 4) };
     if (!certificateId && !req.file) {
       return res.status(400).json({ error: 'Scan the QR code, enter a certificate ID, or upload the certificate file.' });
     }
 
-    const result = await verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, file: req.file?.buffer });
+    const result = await verifyCertificate(store, keys, {
+      certificateId,
+      qrHash,
+      qrSignature,
+      qrDetails: Object.values(qrDetails).some(Boolean) ? qrDetails : null,
+      file: req.file?.buffer,
+    });
     const method =
       [qrHash || qrSignature ? 'QR scan' : certificateId ? 'Certificate ID' : null, req.file ? 'document upload' : null]
         .filter(Boolean)
@@ -109,6 +116,58 @@ export function publicRouter({ store, keys, cfg }) {
       result.registeredCopyUrl = `/api/registered/${result.certificateId}?exp=${exp}&sig=${viewToken(result.certificateId, exp)}`;
     }
     res.json(result);
+  });
+
+  // The QR is genuine, but the paper in front of the verifier shows other details (e.g. 90% instead of
+  // the registered 77%): a genuine QR was copied onto a fake certificate. Only a human can see that,
+  // so the verifier reports it and the registrar gets an alert.
+  const reportsByIp = new Map();
+  router.post('/report-mismatch', async (req, res) => {
+    const b = req.body ?? {};
+    const verifier = parseVerifier(b);
+    if (verifier.error) return res.status(400).json({ error: verifier.error });
+    const certificateId = normalizeId(text(b.certificateId, 60));
+    const shown = text(b.shownDetails, 300);
+
+    const ip = req.ip ?? 'unknown';
+    const hour = Date.now() - 3600_000;
+    const recent = (reportsByIp.get(ip) ?? []).filter((t) => t > hour);
+    if (recent.length >= 10) return res.status(429).json({ error: 'Too many reports from this address. Try again later.' });
+    reportsByIp.set(ip, [...recent, Date.now()]);
+
+    const cert = certificateId && (await store.getCertificate(certificateId));
+    if (!cert) return res.status(404).json({ error: 'Certificate not found.' });
+
+    const p = JSON.parse(cert.payload);
+    const registered = [p.studentName, p.rollNo, p.marks, p.graduationYear].filter(Boolean).join(', ');
+    const message =
+      `A verifier reports that the certificate presented with ${certificateId}'s QR code shows different details` +
+      `${shown ? ` ("${shown}")` : ''} from the registry (${registered}). A genuine QR was likely copied onto a fake certificate.`;
+    const findings = [{ severity: 'high', code: 'reported-mismatch', message }];
+    const at = new Date().toISOString();
+    const who = { verifier_name: verifier.name, verifier_org: verifier.org, verifier_email: verifier.email ?? null, ip: req.ip ?? null };
+
+    const verificationId = await store.addVerification({
+      at,
+      cert_id: certificateId,
+      verdict: 'tampered',
+      method: 'Verifier report: paper differs from QR',
+      ...who,
+      user_agent: String(req.get('user-agent') ?? '').slice(0, 300) || null,
+      malpractice: true,
+      findings: JSON.stringify(findings),
+    });
+    const alertId = await store.addAlert({
+      at,
+      verification_id: verificationId,
+      cert_id: certificateId,
+      verdict: 'tampered',
+      severity: 'high',
+      title: 'Copied QR suspected: the certificate shown does not match its QR / registry details.',
+      findings: JSON.stringify(findings),
+      ...who,
+    });
+    res.status(201).json({ ok: true, alertId });
   });
 
   router.get('/registered/:id', async (req, res) => {

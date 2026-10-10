@@ -129,7 +129,8 @@ export function parseQrText(text, trustedOrigins) {
   const m = url.pathname.match(/\/verify\/([^/?#]+)\/?$/);
   const embeddedId = m ? decodeURIComponent(m[1]).toUpperCase() : null;
   if (embeddedId && trustedOrigins.includes(url.origin)) {
-    return { id: embeddedId, h: url.searchParams.get('h'), s: url.searchParams.get('s') };
+    // Keep the whole query: hash, signature and the details (name, roll, marks, year) the QR carries.
+    return { id: embeddedId, search: url.search };
   }
   return { foreignUrl: t, embeddedId };
 }

@@ -93,7 +93,7 @@ export async function buildVerifiedPdf(original, type, record, qrText) {
   y -= 20;
   const intro = `This page was added by the registrar to the scanned degree certificate on the preceding ${
     scanPages === 1 ? 'page' : `${scanPages} pages`
-  }. Scan the QR code to check it against the institution's official registry.`;
+  }. Scan the QR code to check it against the institution's official registry. The QR shows the student's name, roll number and marks: they must match the certificate.`;
   for (const line of wrap(intro, regular, 10, width)) {
     page.drawText(line, { x: left, y, size: 10, font: regular, color: GREY });
     y -= 14;
@@ -116,6 +116,7 @@ export async function buildVerifiedPdf(original, type, record, qrText) {
     ['Degree', record.program],
     ['Department', record.department],
     ['Year of graduation', String(record.graduationYear)],
+    ...(record.marks ? [['Marks / result', record.marks, bold]] : []),
     ['Registered on', new Date(record.issuedAt).toUTCString().replace(' GMT', ' UTC')],
     ['Signing key ID', record.keyId, mono],
   ];

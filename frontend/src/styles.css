@@ -340,6 +340,9 @@ tr.fresh td { animation: flash 4s ease-out; }
 }
 .admin-main .demo-banner { border: 1px solid var(--warn-line); border-radius: 8px; margin-bottom: 16px; }
 
+.compare-card { border: 2px solid var(--rust); }
+.compare-value { font-weight: 600; font-size: 1rem; }
+
 /* ---------- findings & alerts ---------- */
 .findings.malpractice { border: 2px solid var(--bad); background: var(--bad-bg); }
 .findings.malpractice .card-title { color: var(--bad); }

@@ -29,8 +29,30 @@ export function publicDetails(p) {
     program: p.program,
     department: p.department,
     graduationYear: p.graduationYear,
+    marks: p.marks ?? null,
     issuedAt: p.issuedAt,
   };
+}
+
+// The QR also carries name, roll number, marks and year. Each one present must equal the signed record.
+const QR_DETAIL_FIELDS = [
+  ['name', 'studentName', 'Student name'],
+  ['roll', 'rollNo', 'Roll / register no.'],
+  ['marks', 'marks', 'Marks / result'],
+  ['year', 'graduationYear', 'Year of graduation'],
+];
+const same = (a, b) => String(a ?? '').trim().toLowerCase() === String(b ?? '').trim().toLowerCase();
+
+export function compareQrDetails(qrDetails, payload) {
+  if (!qrDetails) return null;
+  const fields = QR_DETAIL_FIELDS.filter(([k]) => qrDetails[k] != null && qrDetails[k] !== '').map(([k, p, label]) => ({
+    field: k,
+    label,
+    qr: String(qrDetails[k]),
+    registry: payload[p] == null ? null : String(payload[p]),
+    match: same(qrDetails[k], payload[p]),
+  }));
+  return fields.length ? fields : null;
 }
 
 // The registered PDF itself is only fetched when a document needs comparing.
@@ -40,7 +62,7 @@ async function findRow(store, id, fileHash) {
   return undefined;
 }
 
-export async function verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, file }) {
+export async function verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, qrDetails, file }) {
   const steps = newSteps();
   const findings = [];
   const flag = (severity, code, message) => findings.push({ severity, code, message });
@@ -75,9 +97,11 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
   }
   // QR data: what the employer scanned wins; otherwise what was read from the document.
   const fromDoc = loc?.id && loc.id === id;
+  const scanned = Boolean(qrHash || qrSignature);
   const qr = {
     hash: qrHash ?? (fromDoc ? loc.hash : null),
     signature: qrSignature ?? (fromDoc ? loc.signature : null),
+    details: scanned ? qrDetails : fromDoc ? loc.details : null,
   };
   if (qr.hash) evidence.qrHash = qr.hash;
   if (qr.signature) evidence.qrSignature = qr.signature;
@@ -85,6 +109,7 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
   const row = await findRow(store, id, id ? null : fileHash);
   if (!id && row) locatedBy = 'exact file match';
 
+  let qrDetailRows = null; // what the QR itself says, field by field, against the registry
   const finish = (verdict, extra = {}) => ({
     verdict,
     certificateId: row?.id ?? id ?? null,
@@ -94,6 +119,7 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
     malpractice: findings.some((f) => f.severity === 'high' || f.severity === 'medium'),
     document,
     evidence,
+    qrDetails: qrDetailRows,
     ...extra,
   });
 
@@ -147,9 +173,10 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
   steps.signature.detail = `Ed25519 signature verified with institution key ${row.key_id}.`;
   const certificate = publicDetails(payload);
 
-  // 3. Cross-check the QR's hash and signature with the registry.
+  // 3. Cross-check the QR's hash, signature and details with the registry.
+  qrDetailRows = compareQrDetails(qr.details, payload);
   if (qr.hash || qr.signature) {
-    const source = qrHash || qrSignature ? 'scanned QR code' : loc.source === 'qr' ? `QR code on page ${loc.page}` : `printed details on page ${loc.page}`;
+    const source = scanned ? 'scanned QR code' : loc.source === 'qr' ? `QR code on page ${loc.page}` : `printed details on page ${loc.page}`;
     if (qr.hash && qr.hash !== row.document_hash) {
       steps.qr.status = 'fail';
       steps.qr.detail = `The hash in the ${source} differs from the registered document.`;
@@ -162,8 +189,19 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
       flag('high', 'qr-signature', `The signature in the ${source} is forged: it is not the institution's signature for ${row.id}.`);
       return finish('invalid_signature', { certificate });
     }
+    const edited = qrDetailRows?.filter((d) => !d.match) ?? [];
+    if (edited.length) {
+      steps.qr.status = 'fail';
+      steps.qr.detail = `The details in the ${source} differ from the registry: ${edited.map((d) => d.label).join(', ')}.`;
+      for (const d of edited) {
+        flag('high', 'qr-details', `The ${source} says ${d.label} is "${d.qr}", but the registry says "${d.registry ?? 'not recorded'}". The QR code was edited.`);
+      }
+      return finish('tampered', { certificate });
+    }
     steps.qr.status = 'pass';
-    steps.qr.detail = `Hash and signature in the ${source} are identical to the registry record.`;
+    steps.qr.detail = qrDetailRows
+      ? `Hash, signature and details (${qrDetailRows.map((d) => d.label.toLowerCase()).join(', ')}) in the ${source} match the registry record.`
+      : `Hash and signature in the ${source} are identical to the registry record.`;
   } else {
     steps.qr.status = 'skipped';
     steps.qr.detail = 'No QR data to compare (certificate ID entered or file matched directly).';

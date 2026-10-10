@@ -16,7 +16,8 @@ const sha = (data) => crypto.createHash('sha256').update(data).digest('hex');
 
 // ---------------------------------------------------------------- QR text
 
-// Accepts our verify URL (…/verify/<ID>?h=<hash>&s=<signature>) or a bare certificate ID.
+// Accepts our verify URL (…/verify/<ID>?h=<hash>&s=<signature>&n=<name>&r=<roll>&m=<marks>&y=<year>)
+// or a bare certificate ID.
 export function parseQrText(text) {
   const t = String(text ?? '').trim();
   const bare = t.match(new RegExp(`^${ID_RE.source}$`));
@@ -25,10 +26,13 @@ export function parseQrText(text) {
     const url = new URL(t);
     const m = url.pathname.match(/\/verify\/([^/?#]+)\/?$/);
     if (!m) return { foreign: true, raw: t };
+    const p = (k) => url.searchParams.get(k) || null;
+    const details = { name: p('n'), roll: p('r'), marks: p('m'), year: p('y') };
     return {
       id: decodeURIComponent(m[1]).toUpperCase(),
-      hash: url.searchParams.get('h') || null,
-      signature: url.searchParams.get('s') || null,
+      hash: p('h'),
+      signature: p('s'),
+      details: Object.values(details).some(Boolean) ? details : null,
       origin: url.origin,
       raw: t,
     };

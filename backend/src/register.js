@@ -3,9 +3,15 @@ import { buildVerifiedPdf } from './stamp.js';
 
 export const verifyUrlFor = (cfg, id) => `${cfg.publicUrl}/verify/${id}`;
 
-// Everything the QR carries: certificate ID, document hash and signature, as a link to this portal.
-export const qrTextFor = (cfg, id, documentHash, signature) =>
-  `${verifyUrlFor(cfg, id)}?h=${documentHash}&s=${signature}`;
+// What the QR carries, as a link to this portal: the certificate ID, document hash and signature, plus the
+// key details (name, roll number, marks, year) so whoever scans it can compare them with the paper in front
+// of them. The details are cross-checked against the signed registry record on every verification.
+export function qrTextFor(cfg, id, documentHash, signature, details = {}) {
+  const params = new URLSearchParams({ h: documentHash, s: signature });
+  const extra = { n: details.studentName, r: details.rollNo, m: details.marks, y: details.graduationYear };
+  for (const [k, v] of Object.entries(extra)) if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
+  return `${verifyUrlFor(cfg, id)}?${params}`;
+}
 
 async function registerOnce({ store, keys, cfg }, { file, type, fileName, details, actor }) {
   const id = await store.nextCertificateId(`DEG-${details.department}-${details.graduationYear}-`);
@@ -20,6 +26,7 @@ async function registerOnce({ store, keys, cfg }, { file, type, fileName, detail
     program: details.program,
     department: details.department,
     graduationYear: details.graduationYear,
+    marks: details.marks || undefined, // left out (not signed as empty) when the registrar gave none
     documentHash,
     issuedAt,
   });
@@ -38,7 +45,7 @@ async function registerOnce({ store, keys, cfg }, { file, type, fileName, detail
       keyId: keys.keyId,
       portalUrl: cfg.publicUrl,
     },
-    qrTextFor(cfg, id, documentHash, signature),
+    qrTextFor(cfg, id, documentHash, signature, details),
   );
 
   await store.insertCertificate(
