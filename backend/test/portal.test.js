@@ -15,11 +15,91 @@ import { openStore, parseServiceAccount } from '../src/store/index.js';
 import { SqlStore } from '../src/store/sql.js';
 import { FakeFirestore, increment } from './fake-firestore.js';
 import { buildVerifiedPdf } from '../src/stamp.js';
+import { compareMarks, compareName, comparePaper, compareRoll, compareYear, editDistance } from '../src/paper.js';
+import { certificatePageImage } from '../src/document.js';
+
+const OCR_PAYLOAD = { studentName: 'Kavya Nair', rollNo: '21CSE777', marks: '77%', graduationYear: 2026 };
+
+describe('paper comparison (OCR text against the signed record)', () => {
+  test('fuzzy name matching tolerates OCR errors within 2 edits per word', () => {
+    assert.equal(editDistance('KAVYA', 'KALYA'), 1);
+    const fuzzy = compareName('Student Name: Kalya Nar\n', OCR_PAYLOAD.studentName);
+    assert.equal(fuzzy.match, true);
+    assert.equal(compareName('Name: Ravi Kumar VERMA', 'Kavya Nair').match, false, 'a different name is a mismatch');
+    assert.equal(compareName('Student Name: KavyaNair', 'Kavya Nair').match, false, 'glued words still count via edits');
+  });
+
+  test('O/0 and I/1 confusion is treated as the same character', () => {
+    assert.equal(compareRoll('Roll No: 21CSEO77', '21CSE077').match, true, 'letter O read as zero');
+    assert.equal(compareRoll('Roll No : 21-CSE-777', '21CSE777').match, true, 'spaces and hyphens ignored');
+    assert.equal(compareRoll('Roll No: 21CSE999', '21CSE777').match, false);
+    assert.equal(compareYear('Passed in year 2O26', '2026').match, true, 'O read as zero in a year');
+  });
+
+  test('marks match exactly and a conflicting percentage is a conflict', () => {
+    assert.equal(compareMarks('Aggregate: 77%', '77%').match, true);
+    assert.equal(compareMarks('Aggregate: 77 %', '77%').match, true, 'a space before % is tolerated');
+    const conflicted = compareMarks('Percentage: 90%', '77%');
+    assert.equal(conflicted.match, false);
+    assert.equal(conflicted.conflicts.length, 1);
+    assert.equal(conflicted.conflicts[0].paper, '90%');
+
+    const both = compareMarks('Percentage: 77% (rechecked 90%)', '77%');
+    assert.equal(both.match, true, 'the genuine 77% is present…');
+    assert.equal(both.conflicts.length, 1, '…but the 90% is still a conflict');
+  });
+
+  test('CGPA values compare the same way as percentages', () => {
+    assert.equal(compareMarks('CGPA: 8.5', '8.5 CGPA').match, true);
+    const conflicted = compareMarks('CGPA 9.0, First Class', '8.5 CGPA');
+    assert.equal(conflicted.match, false);
+    assert.equal(conflicted.conflicts[0].paper, 'CGPA 9.0');
+  });
+
+  test('non-numeric results are matched verbatim', () => {
+    assert.equal(compareMarks('Result: FIRST CLASS with Distinction', 'First Class').match, true);
+    assert.equal(compareMarks('Result: Pass', 'First Class').match, false);
+  });
+
+  test('a verification-page photo is never trusted as the certificate', () => {
+    const paper = comparePaper('Certificate Verification Page\nStudent name: Kavya Nair\nMarks: 77%', OCR_PAYLOAD);
+    assert.equal(paper.verificationPage, true);
+  });
+
+  test('readable text with every detail matching gives a clean comparison', () => {
+    const paper = comparePaper('DEGREE CERTIFICATE\nKavya Nair\nRoll: 21CSE777\nTotal: 77%\nYear 2026', OCR_PAYLOAD);
+    assert.equal(paper.readable, true);
+    assert.equal(paper.verificationPage, false);
+    assert.equal(paper.conflicts.length, 0);
+    assert.ok(paper.fields.every((f) => f.match));
+  });
+
+  test('a paper that says 90% produces a marks conflict', () => {
+    const paper = comparePaper('DEGREE CERTIFICATE\nKavya Nair\n21CSE777\nPercentage: 90%\n2026', OCR_PAYLOAD);
+    assert.equal(paper.readable, true);
+    assert.ok(paper.conflicts.some((c) => c.field === 'marks' && c.paper === '90%' && c.registry === '77%'));
+  });
+
+  test('empty or short OCR is not readable', () => {
+    assert.equal(comparePaper('', OCR_PAYLOAD).readable, false);
+    assert.equal(comparePaper('Blurry scan', OCR_PAYLOAD).readable, false);
+  });
+});
 
 function defineSuite(label, makeOverrides) {
   describe(label, () => {
     let ctx, server, base, token;
     const VERIFIER = { verifierName: 'Priya Shah', verifierOrganization: 'Acme Hiring Ltd', verifierEmail: 'priya@acme.test' };
+
+    // Deterministic stand-in for Tesseract: a given image buffer always "reads" as the text it was set to.
+    // This keeps the suite offline and fast; the real engine is exercised separately.
+    function makeOcrStub() {
+      const map = new Map();
+      const stub = async (buf) => map.get(sha256(buf)) ?? '';
+      stub.override = (buf, text) => map.set(sha256(buf), text);
+      return stub;
+    }
+    const ocrStub = makeOcrStub();
 
     async function call(method, url, { body, form, auth = true } = {}) {
       const headers = {};
@@ -86,7 +166,7 @@ function defineSuite(label, makeOverrides) {
 
     before(async () => {
       const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'certverify-test-'));
-      ctx = await createApp({ dataDir, publicUrl: 'http://portal.test', ...makeOverrides() });
+      ctx = await createApp({ dataDir, publicUrl: 'http://portal.test', ocr: ocrStub, ...makeOverrides() });
       server = ctx.app.listen(0);
       await once(server, 'listening');
       base = `http://127.0.0.1:${server.address().port}/api`;
@@ -475,6 +555,111 @@ function defineSuite(label, makeOverrides) {
         assert.equal((await call('GET', '/admin/alerts/count')).data.open, before - 1);
         assert.equal((await call('POST', `/admin/alerts/${first.id}/ack`, { body: {} })).status, 404);
         assert.equal((await call('GET', '/admin/alerts', { auth: false })).status, 401);
+      });
+    });
+
+    describe('photo of the whole certificate (scan everything)', () => {
+      // A photo of the certificate: the QR code on it locates the record, and the printed details must match it.
+      const photoOf = async (qrText) => QRCode.toBuffer(qrText, { width: 600 });
+
+      test('a genuine photo whose printed details match the registry is Verified', async () => {
+        const r = await register(await scannedPdf('Z1'), { studentName: 'Kavya Nair', rollNo: '21CSE777', marks: '77%' });
+        const photo = await photoOf(r.qrText);
+        ocrStub.override(photo, 'DEGREE CERTIFICATE\nStudent Name: Kavya Nair\nRoll No: 21CSE777\nAggregate: 77%\nYear: 2026');
+        const res = (await verify({}, photo)).data;
+        assert.equal(res.verdict, 'verified');
+        assert.equal(res.malpractice, false);
+        assert.ok(res.findings.some((f) => f.code === 'paper-check'));
+        assert.equal(res.paper.fields.find((f) => f.field === 'marks').match, true);
+        assert.equal(res.paper.conflicts.length, 0);
+      });
+
+      test('a genuine QR on a paper that says 90% is flagged as a fake and alerts the registrar', async () => {
+        const r = await register(await scannedPdf('Z2'), { studentName: 'Kavya Nair', rollNo: '21CSE777', marks: '77%' });
+        const photo = await photoOf(r.qrText);
+        ocrStub.override(photo, 'DEGREE CERTIFICATE\nName: Kavya Nair\nRoll: 21CSE777\nAggregate: 90%\nYear: 2026');
+        const res = (await verify({}, photo)).data;
+        assert.equal(res.verdict, 'tampered');
+        assert.equal(res.malpractice, true);
+        assert.equal(res.certificateId, r.certificate.id, 'the photocopied QR still points at the genuine record');
+        assert.ok(res.findings.some((f) => f.code === 'qr-paper-mismatch' && f.severity === 'high'));
+        assert.ok(res.paper.conflicts.some((c) => c.paper === '90%' && c.registry === '77%'));
+        assert.ok(res.alertId, 'the registrar is alerted');
+      });
+
+      test('a genuine QR on someone else\u2019s certificate is caught by the name check', async () => {
+        const r = await register(await scannedPdf('Z3'), { studentName: 'Kavya Nair', rollNo: '21CSE777', marks: '77%' });
+        const photo = await photoOf(r.qrText);
+        ocrStub.override(photo, 'DEGREE CERTIFICATE\nName: Ravi Kumar\nRoll: 21CSE777\nAggregate: 77%\nYear: 2026');
+        const res = (await verify({}, photo)).data;
+        assert.equal(res.verdict, 'tampered');
+        assert.ok(res.findings.some((f) => f.code === 'qr-paper-mismatch' && /Student name/.test(f.message)));
+      });
+
+      test('a scanned PDF claiming different marks (99% vs the registered 90) under a genuine QR is a fake certificate', async () => {
+        const r = await register(await scannedPdf('Z6'), { studentName: 'ragav K', rollNo: '23CS334', marks: '90', graduationYear: 2002 });
+        // A brand-new PDF whose certificate page is a scan (an embedded image, no text layer), carrying
+        // the genuine QR on its last page. Page comparison alone can only say "this is a rescan".
+        const doc = await PDFDocument.create();
+        const certPage = doc.addPage([595, 842]);
+        const scanImage = await doc.embedPng(await QRCode.toBuffer(`fabricated scan for ${r.certificate.id}`, { width: 500 }));
+        certPage.drawImage(scanImage, { x: 60, y: 350, width: 400, height: 400 });
+        const qrImage = await doc.embedPng(await QRCode.toBuffer(r.qrText, { width: 500 }));
+        const qrPage = doc.addPage([595, 842]);
+        qrPage.drawImage(qrImage, { x: 120, y: 120, width: 300, height: 300 });
+        const pdf = Buffer.from(await doc.save());
+
+        // OCR reads the certificate page that was scanned in: it says 99%, the registry says 90.
+        const pageImage = await certificatePageImage(pdf);
+        assert.ok(pageImage, 'the scanned certificate page is decoded so it can be read by OCR');
+        assert.equal(await certificatePageImage(await scannedPdf('plain text page')), null, 'a text-only page has nothing to OCR');
+        ocrStub.override(pageImage, 'DEGREE CERTIFICATE\nStudent Name: ragav K\nRoll No: 23CS334\nAggregate: 99%\nYear: 2002');
+
+        const res = (await verify({}, pdf)).data;
+        assert.equal(res.certificateId, r.certificate.id, 'the genuine OCR still leads to the genuine record');
+        assert.equal(res.verdict, 'tampered');
+        assert.equal(res.malpractice, true);
+        assert.ok(res.findings.some((f) => f.code === 'qr-paper-mismatch' && f.severity === 'high'));
+        assert.ok(res.paper.conflicts.some((c) => c.paper === '99%' && c.registry === '90'));
+        assert.ok(res.alertId, 'the registrar is alerted');
+      });
+
+      test('a scanned PDF of the genuine certificate passes the text check but is still sent to a visual review', async () => {
+        const r = await register(await scannedPdf('Z7'), { studentName: 'ragav K', rollNo: '23CS334', marks: '90', graduationYear: 2002 });
+        const doc = await PDFDocument.create();
+        const certPage = doc.addPage([595, 842]);
+        const scanImage = await doc.embedPng(await QRCode.toBuffer(`genuine scan for ${r.certificate.id}`, { width: 500 }));
+        certPage.drawImage(scanImage, { x: 60, y: 350, width: 400, height: 400 });
+        const qrImage = await doc.embedPng(await QRCode.toBuffer(r.qrText, { width: 500 }));
+        const qrPage = doc.addPage([595, 842]);
+        qrPage.drawImage(qrImage, { x: 120, y: 120, width: 300, height: 300 });
+        const pdf = Buffer.from(await doc.save());
+        const pageImage = await certificatePageImage(pdf);
+        ocrStub.override(pageImage, 'DEGREE CERTIFICATE\nStudent Name: ragav K\nRoll No: 23CS334\nAggregate: 90%\nYear: 2002');
+        const res = (await verify({}, pdf)).data;
+        assert.equal(res.verdict, 'review', 'a rescanned copy gets a visual check, not a green Verified');
+        assert.equal(res.malpractice, false);
+        assert.ok(res.findings.some((f) => f.code === 'rescanned'));
+      });
+
+      test('a photo of the verification page is sent for a visual check, never trusted', async () => {
+        const r = await register(await scannedPdf('Z4'), { studentName: 'Kavya Nair', marks: '77%' });
+        const photo = await photoOf(r.qrText);
+        ocrStub.override(photo, 'Certificate Verification Page\nStudent name: Kavya Nair\nMarks: 77%\nYear: 2026');
+        const res = (await verify({}, photo)).data;
+        assert.equal(res.verdict, 'review');
+        assert.equal(res.paper.verificationPage, true);
+        assert.ok(res.findings.some((f) => f.code === 'verification-page'));
+      });
+
+      test('a photo with unreadable text is sent for a visual check with a retake hint', async () => {
+        const r = await register(await scannedPdf('Z5'), { marks: '77%' });
+        const photo = await photoOf(r.qrText);
+        ocrStub.override(photo, 'DLT CWZ'); // Tesseract garbage
+        const res = (await verify({}, photo)).data;
+        assert.equal(res.verdict, 'review');
+        assert.equal(res.malpractice, false);
+        assert.ok(res.findings.some((f) => f.code === 'image-unreadable'));
       });
     });
 

@@ -16,6 +16,9 @@ async function seedAdmin(store, cfg) {
 
 export async function createApp(overrides = {}) {
   const cfg = { ...config, ...overrides };
+  // Reading the text on a certificate photo (Tesseract) is lazy: it only costs anything on the first use,
+  // and tests inject a stub instead of the real engine.
+  cfg.ocr = typeof overrides.ocr === 'function' ? overrides.ocr : (await import('./ocr.js')).recognizeText;
   const store = await openStore(cfg);
   const keys = await resolveKeys(cfg, store);
   await seedAdmin(store, cfg);

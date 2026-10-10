@@ -1,5 +1,6 @@
 import { sha256, verifySignature } from './crypto.js';
-import { comparePages, readDocument, registeredPages } from './document.js';
+import { certificatePageImage, comparePages, readDocument, registeredPages } from './document.js';
+import { comparePaper } from './paper.js';
 
 // Decision flow: located? -> signature valid? -> QR matches registry? -> revoked? -> document matches? -> Verified
 const STEPS = {
@@ -62,7 +63,7 @@ async function findRow(store, id, fileHash) {
   return undefined;
 }
 
-export async function verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, qrDetails, file }) {
+export async function verifyCertificate(store, keys, { certificateId, qrHash, qrSignature, qrDetails, file, ocr }) {
   const steps = newSteps();
   const findings = [];
   const flag = (severity, code, message) => findings.push({ severity, code, message });
@@ -248,7 +249,23 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
       steps.file.status = 'skipped';
       steps.file.detail = 'This is a printed-and-scanned copy, so its pages cannot be compared automatically.';
       flag('info', 'rescanned', 'The QR code is genuine, but this is a scanned or photographed copy. Compare it visually with the registered copy.');
-      return finish('review', { certificate });
+
+      // A printed-and-scanned copy is a photo in disguise: read what the certificate page actually says
+      // and compare it with the signed record, so a scanned fake cannot hide behind "it is just a scan".
+      const scanned = await paperFromPdf(file, ocr, payload);
+      if (scanned?.paper && scanned.paper.readable && !scanned.paper.verificationPage && scanned.paper.conflicts.length) {
+        steps.file.status = 'fail';
+        steps.file.detail = `What the scanned certificate says differs from the registry: ${scanned.paper.conflicts.map((c) => `${c.label} "${c.paper}" instead of "${c.registry}"`).join('; ')}.`;
+        for (const c of scanned.paper.conflicts) {
+          flag('high', 'qr-paper-mismatch', `The certificate presented to the verifier shows ${c.label} "${c.paper}", but the genuine QR and registry say "${c.registry}". A genuine QR code was copied onto a fake certificate.`);
+        }
+        return finish('tampered', { certificate, paper: scanned.paper });
+      }
+      if (scanned?.paper?.verificationPage) {
+        steps.file.detail = 'The scan shows the verification page, whose details are already printed by the registrar. It proves nothing by itself. Take a photo of the certificate page itself.';
+        flag('info', 'verification-page', 'The scanned photo shows the verification (QR) page, not the certificate. A genuine QR pasted there proves nothing.');
+      }
+      return finish('review', { certificate, paper: scanned?.paper ?? null });
     }
     steps.file.status = 'fail';
     const bad = rows.filter((r) => r.status !== 'match');
@@ -267,17 +284,73 @@ export async function verifyCertificate(store, keys, { certificateId, qrHash, qr
   }
 
   if (doc.kind === 'image' && doc.readable) {
+    if (findings.some((f) => f.severity === 'high')) return finish('tampered', { certificate });
     steps.file.status = 'skipped';
-    steps.file.detail = 'An image cannot be compared byte-for-byte with the registered PDF.';
-    if (!findings.some((f) => f.severity === 'high')) {
+    steps.file.detail = 'An image is checked by reading the text printed on the certificate, not byte-for-byte.';
+
+    if (!ocr) {
       flag('info', 'image-upload', 'The QR code was checked, but this is a photo or image. Compare it visually with the registered copy.');
       return finish('review', { certificate });
     }
-    return finish('tampered', { certificate });
+
+    // Read what the certificate paper actually says and compare it with the signed record.
+    let paper;
+    try {
+      paper = comparePaper(await ocr(file), payload);
+    } catch {
+      steps.file.detail = 'The photo could not be scanned for text, so it is sent for a visual check.';
+      flag('info', 'ocr-unavailable', 'The photo could not be read for text. Compare it visually with the registered copy.');
+      return finish('review', { certificate });
+    }
+
+    // Our verification page prints the genuine details itself, so a faker could photograph that instead.
+    // Only the certificate page is trusted.
+    if (paper.verificationPage) {
+      steps.file.status = 'skipped';
+      steps.file.detail = 'This is the verification page, whose details are already printed by the registrar. It proves nothing by itself.';
+      flag('info', 'verification-page', 'The photo shows the verification (QR) page, not the certificate. A genuine QR pasted there proves nothing. Take a photo of the certificate page itself.');
+      return finish('review', { certificate, paper });
+    }
+
+    if (!paper.readable) {
+      steps.file.status = 'skipped';
+      steps.file.detail = 'Not enough text could be read from the photo to compare it with the registry.';
+      flag('info', 'image-unreadable', 'The text on the certificate photo could not be read. Retake the photo: hold it flat, in good light, filling the frame.');
+      return finish('review', { certificate, paper });
+    }
+
+    // The paper was readable: every detail printed on it must agree with the signed record.
+    if (paper.conflicts.length) {
+      steps.file.status = 'fail';
+      steps.file.detail = `What the certificate says differs from the registry: ${paper.conflicts.map((c) => `${c.label} "${c.paper}" instead of "${c.registry}"`).join('; ')}.`;
+      for (const c of paper.conflicts) {
+        flag('high', 'qr-paper-mismatch', `The certificate presented to the verifier shows ${c.label} "${c.paper}", but the genuine QR and registry say "${c.registry}". A genuine QR code was copied onto a fake certificate.`);
+      }
+      return finish('tampered', { certificate, paper });
+    }
+
+    steps.file.status = 'pass';
+    steps.file.detail = 'The text printed on the certificate matches the signed registry record.';
+    const read = paper.fields.map((f) => `${f.label.toLowerCase()}: ${f.paper}`).join(', ');
+    flag('info', 'paper-check', `Read the certificate photo (${read}) and every detail matches the signed registry record.`);
+    return finish('verified', { certificate, paper });
   }
 
   steps.file.status = 'fail';
   steps.file.detail = 'The uploaded file could not be read as a PDF or image.';
   flag('medium', 'unreadable', 'The uploaded file is damaged or not a PDF/JPG/PNG, so it could not be compared with the registered copy.');
   return finish('tampered', { certificate });
+}
+
+// OCR for the certificate page inside a scanned PDF. Only the certificate page is read, never the
+// verification page: a genuine QR pasted on the verification page proves nothing by itself.
+async function paperFromPdf(file, ocr, payload) {
+  if (!ocr) return null;
+  try {
+    const photo = await certificatePageImage(file);
+    if (!photo) return null;
+    return { paper: comparePaper(await ocr(photo), payload) };
+  } catch {
+    return null;
+  }
 }

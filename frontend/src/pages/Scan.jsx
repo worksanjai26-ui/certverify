@@ -89,40 +89,83 @@ export default function Scan() {
     }
   }
 
+  async function checkWholeCertificate(file) {
+    setMessage('');
+    setForeign(null);
+    navigate('/verify', { state: { file } });
+    stop();
+  }
+
   return (
     <div className="grid grid-2" style={{ alignItems: 'start' }}>
       <div>
-        <div className="eyebrow">Employer scans QR</div>
-        <h1>Scan the certificate's QR code</h1>
+        <div className="eyebrow">Employer scans certificate</div>
+        <h1>Check the certificate you were given</h1>
         <p className="lead">
-          The QR code is on the verification page at the end of the certificate. It carries the certificate ID, the
-          document hash and the institution's signature, which are cross-checked against the registry.
+          The official copy ends with a verification page carrying the QR code. Scanning the QR alone only proves the
+          code is genuine, not that the paper it is printed on is. A one-shot photo of the <strong>whole
+          certificate</strong> lets us also read what is printed on it and compare it with the registry.
         </p>
         <div className="callout">
-          <strong>The QR code is only a pointer, never proof on its own.</strong> If a code sends you to a different
-          website, we'll warn you instead of following it.
+          <strong>One photo is the strongest check.</strong> We read the QR <em>and</em> the printed name, roll number
+          and marks. If the paper and the QR disagree (for example the certificate says 90% but the QR says 77%), the
+          certificate is flagged as a fake and the college is notified.
         </div>
       </div>
 
-      <div className="card stack">
-        {/* Always in the layout: the library measures this element before React re-renders. */}
-        <div id="qr-reader" />
-        <div id="qr-file-reader" style={{ display: 'none' }} />
-        {scanning ? (
-          <button className="btn ghost block" onClick={stop}>
-            Stop camera
-          </button>
-        ) : (
-          <button className="btn primary block" onClick={start}>
-            Start camera
-          </button>
-        )}
-        <FileDrop
-          onFile={scanImage}
-          accept="image/*"
-          title="Or upload a photo / screenshot of the QR"
-          hint="PNG, JPG or HEIC from your phone"
-        />
+      <div className="stack">
+        <div className="card stack">
+          <div className="card-title">Photo of the whole certificate — recommended</div>
+          <p className="small muted" style={{ marginTop: 0 }}>
+            Camera or file. Hold the certificate flat, fill the frame, and use good light so the text is readable.
+          </p>
+          <label className="btn primary block camera-btn">
+            📷 Take a photo
+            <input
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) checkWholeCertificate(f);
+              }}
+            />
+          </label>
+          <FileDrop
+            onFile={checkWholeCertificate}
+            accept="image/*"
+            title="Or upload a photo of the certificate"
+            hint="PNG, JPG or HEIC from your phone, showing the certificate including its QR code"
+          />
+        </div>
+
+        <div className="card stack">
+          <div className="card-title">Scan just the QR code</div>
+          <p className="small muted" style={{ marginTop: 0 }}>
+            Quick, but only checks the code itself. Compare the details below with the paper, and check the document
+            afterwards for the full page-by-page comparison.
+          </p>
+          {/* Always in the layout: the library measures this element before React re-renders. */}
+          <div id="qr-reader" />
+          <div id="qr-file-reader" style={{ display: 'none' }} />
+          {scanning ? (
+            <button className="btn ghost block" onClick={stop}>
+              Stop camera
+            </button>
+          ) : (
+            <button className="btn block" onClick={start}>
+              Start camera
+            </button>
+          )}
+          <FileDrop
+            onFile={scanImage}
+            accept="image/*"
+            title="Or upload a photo / screenshot of the QR"
+            hint="PNG, JPG or HEIC from your phone"
+          />
+        </div>
+
         {message && <div className="error-box">{message}</div>}
         {foreign && (
           <div className="card" style={{ borderColor: 'var(--bad)' }}>

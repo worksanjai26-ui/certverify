@@ -276,6 +276,40 @@ export async function readDocument(buf) {
   return { kind: 'unknown', readable: false, pages: [] };
 }
 
+// A printed-and-scanned PDF is a photo in disguise: its pages are embedded images. This decodes the
+// certificate page (the first page; the verification page is always last and must never be trusted) into
+// a PNG so it can be read with OCR like a camera photo. Returns null when the page has no decodable image.
+export async function certificatePageImage(buf) {
+  let doc;
+  try {
+    doc = await PDFDocument.load(buf, { ignoreEncryption: true, updateMetadata: false });
+  } catch {
+    return null;
+  }
+  if (doc.getPageCount() < 1) return null;
+  const parts = pageParts(doc, doc.getPage(0));
+  let best = null;
+  let bestArea = 0;
+  for (const img of parts.images) {
+    let rgba = null;
+    try {
+      rgba = rgbaFromPdfImage(parts.ctx, img);
+    } catch {
+      /* undecodable image: skip */
+    }
+    if (!rgba) continue;
+    const area = rgba.width * rgba.height;
+    if (area > bestArea) {
+      bestArea = area;
+      best = rgba;
+    }
+  }
+  if (!best) return null;
+  const png = new PNG({ width: best.width, height: best.height });
+  png.data = Buffer.from(best.data.buffer, best.data.byteOffset, best.data.length);
+  return PNG.sync.write(png);
+}
+
 // A registered PDF never changes, so its page fingerprints are cached per instance, keyed by the PDF's
 // own SHA-256 (not the certificate ID, which a reset or different database may reuse for another file).
 const registeredCache = new Map();

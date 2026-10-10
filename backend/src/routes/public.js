@@ -71,6 +71,7 @@ export function publicRouter({ store, keys, cfg }) {
       qrSignature,
       qrDetails: Object.values(qrDetails).some(Boolean) ? qrDetails : null,
       file: req.file?.buffer,
+      ocr: cfg.ocr,
     });
     const method =
       [qrHash || qrSignature ? 'QR scan' : certificateId ? 'Certificate ID' : null, req.file ? 'document upload' : null]

@@ -308,6 +308,69 @@ export function CompareWithPaper({ result, verifier }) {
   );
 }
 
+// What the OCR read from a photo of the whole certificate, compared field by field with the registry.
+// A genuine QR pasted onto a paper with different details is exactly the fake this catches.
+export function PaperComparison({ paper }) {
+  if (!paper) return null;
+  if (paper.verificationPage) {
+    return (
+      <div className="card" style={{ borderColor: 'var(--warn)' }}>
+        <div className="card-title">The photo shows the verification page, not the certificate</div>
+        <p>
+          This page is printed by the registrar and already carries the genuine details, so matching it proves
+          nothing — a faker can paste a genuine QR onto it. Take a photo of the certificate page itself, then check
+          it again.
+        </p>
+      </div>
+    );
+  }
+  if (!paper.readable) return null;
+  const conflicting = paper.conflicts ?? [];
+  return (
+    <div className={`card${conflicting.length ? ' compare-card' : ''}`} style={conflicting.length ? { borderColor: 'var(--bad)' } : undefined}>
+      <div className="card-title">{conflicting.length ? '⚠ The certificate text disagrees with the registry' : 'What the certificate says vs. the registry'}</div>
+      <p className="small muted" style={{ marginTop: 0 }}>
+        These details were read from the photo of your certificate. A genuine QR code is worthless if the paper beside
+        it shows different details.
+      </p>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Detail</th>
+              <th>On the certificate (read from photo)</th>
+              <th>Official registry</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody>
+            {paper.fields.map((d) => {
+              const missing = d.paper == null;
+              return (
+                <tr key={d.field}>
+                  <td className="small muted">{d.label}</td>
+                  <td className="compare-value">{d.paper ?? '—'}</td>
+                  <td className="compare-value">{d.registry ?? '—'}</td>
+                  <td>
+                    <span className={`badge tone-${d.match ? 'ok' : missing ? 'warn' : 'bad'}`}>{d.match ? 'Matches' : missing ? 'Not found' : 'Differs'}</span>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {conflicting.length > 0 && (
+        <div className="error-box" style={{ marginTop: 12 }}>
+          <strong>Fake certificate suspected:</strong> the details printed on this paper disagree with the genuine QR
+          code and registry. A QR stamp was likely copied onto a fake certificate. Do not accept it; the registrar has
+          been notified.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function VerdictView({ result, verifier }) {
   const c = result.certificate;
   const e = result.evidence;
@@ -316,6 +379,7 @@ export default function VerdictView({ result, verifier }) {
       <VerdictBanner verdict={result.verdict} certificateId={result.certificateId} checkedAt={result.checkedAt} />
       <Findings result={result} />
       <CompareWithPaper result={result} verifier={verifier} />
+      <PaperComparison paper={result.paper} />
       <DocumentComparison result={result} />
 
       <div className="grid grid-2">

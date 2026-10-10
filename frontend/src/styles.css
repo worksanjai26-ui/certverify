@@ -205,6 +205,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--rust); outl
 .btn.danger { background: var(--bad); border-color: var(--bad); color: var(--on-solid); }
 .btn.sm { padding: 6px 10px; font-size: 0.85rem; }
 .btn.block { width: 100%; justify-content: center; }
+.camera-btn { position: relative; overflow: hidden; }
+.camera-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .search-bar { display: flex; gap: 8px; }
 .search-bar input { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.03em; }
 .search-bar input::placeholder { text-transform: none; letter-spacing: 0; font-family: var(--sans); }
